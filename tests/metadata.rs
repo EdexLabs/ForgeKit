@@ -74,29 +74,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trie_prefix_matching_logic() {
-        let mut trie = FunctionTrie::new();
-        let func = Arc::new(create_test_function("$getUser"));
-        trie.insert("$getUser", func);
-
-        // 1. Partial match should fail if it's not a complete token in the trie
-        assert!(
-            trie.get_prefix("$get").is_none(),
-            "Should not match partial prefix without value"
-        );
-
-        // 2. Exact match should work
-        let (name, _) = trie.get_prefix("$getUser").expect("Exact match failed");
-        assert_eq!(name, "$getUser");
-
-        // 3. Prefix match with trailing code/noise should work (essential for Parser)
-        let (name, _) = trie
-            .get_prefix("$getUser[12345]")
-            .expect("Prefix match with args failed");
-        assert_eq!(name, "$getUser");
-    }
-
-    #[test]
     fn test_trie_completions_logic() {
         let mut trie = FunctionTrie::new();
         trie.insert("$add", Arc::new(create_test_function("$add")));

@@ -17,6 +17,13 @@ use std::sync::Arc;
 // Core Types
 // ============================================================================
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventField {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// Source configuration for fetching metadata
 #[derive(Debug, Clone)]
 pub struct MetadataSource {
@@ -141,30 +148,31 @@ impl FunctionTrie {
         node.value.clone()
     }
 
-    /// Get longest prefix match starting from the beginning of the text
-    ///
-    /// This is used during parsing to identify a function within a string.
-    /// It returns the canonical name (original casing) and the function metadata.
+    /// Get longest prefix match
     pub fn get_prefix(&self, text: &str) -> Option<(String, Arc<Function>)> {
-        let mut node = &self.root;
-        let mut last_found: Option<(String, Arc<Function>)> = None;
+        let chars: Vec<char> = text.to_lowercase().chars().collect();
+        let mut best_match: Option<(String, Arc<Function>)> = None;
 
-        for ch in text.chars() {
-            let lower_ch = ch.to_lowercase().next().unwrap();
-            match node.children.get(&lower_ch) {
-                Some(next) => {
-                    node = next;
-                    // If this node contains a value, we've found a valid function.
-                    // We continue searching to find the longest possible match.
-                    if let Some(func) = &node.value {
-                        last_found = Some((func.name.clone(), func.clone()));
+        for start in 0..chars.len() {
+            let mut node = &self.root;
+            let mut matched = String::with_capacity(chars.len() - start);
+
+            for &ch in &chars[start..] {
+                match node.children.get(&ch) {
+                    Some(next) => {
+                        matched.push(ch);
+                        node = next;
+
+                        if let Some(func) = &node.value {
+                            best_match = Some((matched.clone(), func.clone()));
+                        }
                     }
+                    None => break,
                 }
-                None => break,
             }
         }
 
-        last_found
+        best_match
     }
 
     /// Get all functions with a given prefix
@@ -233,21 +241,29 @@ pub struct Fetcher {
 impl Fetcher {
     /// Create a new fetcher
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        #[cfg(target_arch = "wasm32")]
+        let client = reqwest::Client::builder()
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        Self { client }
     }
 
     /// Fetch JSON from a URL with proper error handling
     pub async fn fetch_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        // Make request
         let response =
             self.client.get(url).send().await.map_err(|e| {
                 MetadataError::NetworkError(format!("Failed to fetch {}: {}", url, e))
             })?;
 
+        // Check status
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(MetadataError::NotFound(format!("URL not found: {}", url)));
@@ -260,6 +276,7 @@ impl Fetcher {
             )));
         }
 
+        // Parse JSON
         let text = response.text().await.map_err(|e| {
             MetadataError::NetworkError(format!("Failed to read response from {}: {}", url, e))
         })?;
@@ -273,6 +290,7 @@ impl Fetcher {
     pub async fn fetch_functions(&self, url: &str, extension: String) -> Result<Vec<Function>> {
         let mut functions: Vec<Function> = self.fetch_json(url).await?;
 
+        // Add extension metadata
         for func in &mut functions {
             func.extension = Some(extension.clone());
             func.source_url = Some(url.to_string());
@@ -338,6 +356,7 @@ impl MetadataManager {
         let mut errors = Vec::new();
 
         for source in sources {
+            // Fetch functions
             if let Some(url) = &source.functions_url {
                 match self
                     .fetcher
@@ -354,6 +373,7 @@ impl MetadataManager {
                 }
             }
 
+            // Fetch enums
             if let Some(url) = &source.enums_url {
                 match self.fetcher.fetch_enums(url).await {
                     Ok(enums) => {
@@ -363,6 +383,7 @@ impl MetadataManager {
                         }
                     }
                     Err(e) => {
+                        // Enums are optional, just log
                         if !matches!(e, MetadataError::NotFound(_)) {
                             errors.push(format!("Enums from {}: {}", source.extension, e));
                         }
@@ -370,6 +391,7 @@ impl MetadataManager {
                 }
             }
 
+            // Fetch events
             if let Some(url) = &source.events_url {
                 match self.fetcher.fetch_events(url).await {
                     Ok(events) => {
@@ -379,6 +401,7 @@ impl MetadataManager {
                         }
                     }
                     Err(e) => {
+                        // Events are optional, just log
                         if !matches!(e, MetadataError::NotFound(_)) {
                             errors.push(format!("Events from {}: {}", source.extension, e));
                         }
@@ -401,8 +424,11 @@ impl MetadataManager {
 
         for func in functions {
             let arc_func = Arc::new(func.clone());
+
+            // Insert main name
             trie.insert(&func.name, arc_func.clone());
 
+            // Insert aliases
             if let Some(aliases) = &func.aliases {
                 for alias in aliases {
                     let alias_name = if alias.starts_with('$') {
@@ -411,6 +437,7 @@ impl MetadataManager {
                         format!("${}", alias)
                     };
 
+                    // Create alias function
                     let mut alias_func = (*arc_func).clone();
                     alias_func.name = alias_name.clone();
                     trie.insert(&alias_name, Arc::new(alias_func));
@@ -434,18 +461,26 @@ impl MetadataManager {
     /// Get function (tries exact first, then prefix)
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
         let trie = self.trie.read().unwrap();
+
+        // Try exact match first
         if let Some(func) = trie.get_exact(name) {
             return Some(func);
         }
+
+        // Try prefix match
         trie.get_prefix(name).map(|(_, func)| func)
     }
 
-    /// Get function with match info
+    /// Get function with match info (for compatibility)
     pub fn get_with_match(&self, name: &str) -> Option<(String, Arc<Function>)> {
         let trie = self.trie.read().unwrap();
+
+        // Try exact match first
         if let Some(func) = trie.get_exact(name) {
             return Some((name.to_string(), func));
         }
+
+        // Try prefix match
         trie.get_prefix(name)
     }
 
@@ -564,6 +599,7 @@ pub struct MetadataCache {
 impl MetadataCache {
     const VERSION: u32 = 1;
 
+    /// Create a new cache
     pub fn new(
         functions: Vec<Function>,
         enums: HashMap<String, Vec<String>>,
@@ -579,6 +615,7 @@ impl MetadataCache {
 }
 
 impl MetadataManager {
+    /// Export metadata to cache
     pub fn export_cache(&self) -> MetadataCache {
         MetadataCache::new(
             self.all_functions().iter().map(|f| (**f).clone()).collect(),
@@ -587,6 +624,7 @@ impl MetadataManager {
         )
     }
 
+    /// Import metadata from cache
     pub fn import_cache(&self, cache: MetadataCache) -> Result<()> {
         if cache.version != MetadataCache::VERSION {
             return Err(MetadataError::CacheError(format!(
@@ -596,13 +634,18 @@ impl MetadataManager {
             )));
         }
 
+        // Clear existing data
         self.clear();
+
+        // Add functions
         self.add_functions(cache.functions);
 
+        // Add enums
         for (name, values) in cache.enums {
             self.enums.insert(name, values);
         }
 
+        // Add events
         for event in cache.events {
             self.events.insert(event.name.clone(), event);
         }
@@ -610,12 +653,14 @@ impl MetadataManager {
         Ok(())
     }
 
+    /// Serialize cache to JSON
     pub fn cache_to_json(&self) -> Result<String> {
         let cache = self.export_cache();
         serde_json::to_string(&cache)
             .map_err(|e| MetadataError::CacheError(format!("Serialization failed: {}", e)))
     }
 
+    /// Deserialize cache from JSON
     pub fn cache_from_json(&self, json: &str) -> Result<()> {
         let cache: MetadataCache = serde_json::from_str(json)
             .map_err(|e| MetadataError::CacheError(format!("Deserialization failed: {}", e)))?;
@@ -629,19 +674,25 @@ impl MetadataManager {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MetadataManager {
+    /// Save cache to file
     pub fn save_cache_to_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         use std::io::Write;
+
         let json = self.cache_to_json()?;
         let mut file = std::fs::File::create(path)
             .map_err(|e| MetadataError::CacheError(format!("Failed to create file: {}", e)))?;
+
         file.write_all(json.as_bytes())
             .map_err(|e| MetadataError::CacheError(format!("Failed to write file: {}", e)))?;
+
         Ok(())
     }
 
+    /// Load cache from file
     pub fn load_cache_from_file(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
         let json = std::fs::read_to_string(path)
             .map_err(|e| MetadataError::CacheError(format!("Failed to read file: {}", e)))?;
+
         self.cache_from_json(&json)
     }
 }
@@ -650,14 +701,17 @@ impl MetadataManager {
 // Utility Functions
 // ============================================================================
 
+/// Create a metadata source from a GitHub repository
 pub fn github_source(extension: impl Into<String>, repo: &str, branch: &str) -> MetadataSource {
     let base = format!("https://raw.githubusercontent.com/{}/{}/", repo, branch);
+
     MetadataSource::new(extension)
         .with_functions(format!("{}functions.json", base))
         .with_enums(format!("{}enums.json", base))
         .with_events(format!("{}events.json", base))
 }
 
+/// Create a metadata source from custom URLs
 pub fn custom_source(extension: impl Into<String>) -> MetadataSource {
     MetadataSource::new(extension)
 }
