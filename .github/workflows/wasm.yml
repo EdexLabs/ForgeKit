@@ -28,7 +28,7 @@ jobs:
           version: latest
 
       - name: Build WASM package
-        run: wasm-pack build --release --target web --features wasm
+        run: wasm-pack build --release --target web --features wasm,validation
 
       - name: Remove pkg .gitignore
         run: rm -f pkg/.gitignore
