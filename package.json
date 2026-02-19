@@ -1,0 +1,25 @@
+{
+  "name": "forge-kit",
+  "type": "module",
+  "collaborators": [
+    "Muhammad Bin Asim <muhammadbinasim471@gmail.com>"
+  ],
+  "description": "High-performance metadata manager and parser for ForgeScript.",
+  "version": "0.1.1",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EdexLabs/forgekit"
+  },
+  "files": [
+    "forge_kit_bg.wasm",
+    "forge_kit.js",
+    "forge_kit.d.ts"
+  ],
+  "main": "forge_kit.js",
+  "homepage": "https://forgekit.vercel.app",
+  "types": "forge_kit.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
