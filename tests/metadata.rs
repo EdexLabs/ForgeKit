@@ -13,7 +13,7 @@ mod tests {
             description: "Test function".to_string(),
             args: Some(vec![]),
             brackets: Some(true),
-            version: Some("1.0.0".to_string()).into(),
+            version: Some(serde_json::json!("1.0.0")),
             unwrap: true,
             ..Default::default()
         }

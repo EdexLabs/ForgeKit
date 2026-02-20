@@ -282,18 +282,60 @@ impl Fetcher {
         })?;
 
         serde_json::from_str(&text).map_err(|e| {
-            MetadataError::ParseError(format!("Failed to parse JSON from {}: {}", url, e))
+            // Include a preview of the raw JSON to help debug which field is malformed
+            let preview: String = text.chars().take(200).collect();
+            MetadataError::ParseError(format!(
+                "Failed to parse JSON from {}: {}\nJSON preview: {}…",
+                url, e, preview
+            ))
         })
     }
 
-    /// Fetch functions from URL
+    /// Fetch functions from URL, parsing each item individually so one bad entry
+    /// doesn't block the rest.
     pub async fn fetch_functions(&self, url: &str, extension: String) -> Result<Vec<Function>> {
-        let mut functions: Vec<Function> = self.fetch_json(url).await?;
+        let response =
+            self.client.get(url).send().await.map_err(|e| {
+                MetadataError::NetworkError(format!("Failed to fetch {}: {}", url, e))
+            })?;
 
-        // Add extension metadata
-        for func in &mut functions {
-            func.extension = Some(extension.clone());
-            func.source_url = Some(url.to_string());
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(MetadataError::NotFound(format!("URL not found: {}", url)));
+        }
+        if !status.is_success() {
+            return Err(MetadataError::NetworkError(format!(
+                "HTTP {}: {}",
+                status, url
+            )));
+        }
+
+        let text = response.text().await.map_err(|e| {
+            MetadataError::NetworkError(format!("Failed to read response from {}: {}", url, e))
+        })?;
+
+        // Parse the outer array as raw values first
+        let raw_items: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| {
+            let preview: String = text.chars().take(200).collect();
+            MetadataError::ParseError(format!(
+                "Failed to parse JSON array from {}: {}\nJSON preview: {}…",
+                url, e, preview
+            ))
+        })?;
+
+        let mut functions = Vec::with_capacity(raw_items.len());
+        for (i, raw) in raw_items.into_iter().enumerate() {
+            match serde_json::from_value::<Function>(raw) {
+                Ok(mut func) => {
+                    func.extension = Some(extension.clone());
+                    func.source_url = Some(url.to_string());
+                    functions.push(func);
+                }
+                Err(e) => {
+                    // Log and skip the bad entry — don't abort the whole file
+                    eprintln!("[forge-kit] Skipping function #{} from {}: {}", i, url, e);
+                }
+            }
         }
 
         Ok(functions)
@@ -356,7 +398,7 @@ impl MetadataManager {
         let mut errors = Vec::new();
 
         for source in sources {
-            // Fetch functions
+            // Fetch functions — don't abort on error; continue to enums/events
             if let Some(url) = &source.functions_url {
                 match self
                     .fetcher
@@ -367,13 +409,16 @@ impl MetadataManager {
                         total_functions += functions.len();
                         self.add_functions(functions);
                     }
+                    Err(MetadataError::NotFound(_)) => {
+                        // 404 is fine — optional
+                    }
                     Err(e) => {
                         errors.push(format!("Functions from {}: {}", source.extension, e));
                     }
                 }
             }
 
-            // Fetch enums
+            // Fetch enums — always continue regardless of functions result
             if let Some(url) = &source.enums_url {
                 match self.fetcher.fetch_enums(url).await {
                     Ok(enums) => {
@@ -383,7 +428,6 @@ impl MetadataManager {
                         }
                     }
                     Err(e) => {
-                        // Enums are optional, just log
                         if !matches!(e, MetadataError::NotFound(_)) {
                             errors.push(format!("Enums from {}: {}", source.extension, e));
                         }
@@ -391,7 +435,7 @@ impl MetadataManager {
                 }
             }
 
-            // Fetch events
+            // Fetch events — always continue regardless of functions/enums result
             if let Some(url) = &source.events_url {
                 match self.fetcher.fetch_events(url).await {
                     Ok(events) => {
@@ -401,7 +445,6 @@ impl MetadataManager {
                         }
                     }
                     Err(e) => {
-                        // Events are optional, just log
                         if !matches!(e, MetadataError::NotFound(_)) {
                             errors.push(format!("Events from {}: {}", source.extension, e));
                         }
