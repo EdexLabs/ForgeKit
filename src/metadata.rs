@@ -148,31 +148,36 @@ impl FunctionTrie {
         node.value.clone()
     }
 
-    /// Get longest prefix match
+    /// Get the longest registered function name that is a prefix of `text`,
+    /// matching strictly from the start of `text`.
+    ///
+    /// For example, if `$ping` is registered:
+    ///   - `get_prefix("$pingmsoko")`    → Some(("$ping", …))
+    ///   - `get_prefix("$pingsmmonwind")` → Some(("$ping", …))
+    ///   - `get_prefix("$send")`          → None  (no registered prefix)
+    ///
+    /// The search always starts at position 0 of `text`; it will never match
+    /// a function name found only in the middle of the string.
     pub fn get_prefix(&self, text: &str) -> Option<(String, Arc<Function>)> {
-        let chars: Vec<char> = text.to_lowercase().chars().collect();
-        let mut best_match: Option<(String, Arc<Function>)> = None;
+        let mut node = &self.root;
+        let mut last_match: Option<(String, Arc<Function>)> = None;
+        let mut matched = String::with_capacity(text.len());
 
-        for start in 0..chars.len() {
-            let mut node = &self.root;
-            let mut matched = String::with_capacity(chars.len() - start);
-
-            for &ch in &chars[start..] {
-                match node.children.get(&ch) {
-                    Some(next) => {
-                        matched.push(ch);
-                        node = next;
-
-                        if let Some(func) = &node.value {
-                            best_match = Some((matched.clone(), func.clone()));
-                        }
+        for ch in text.to_lowercase().chars() {
+            match node.children.get(&ch) {
+                Some(next) => {
+                    matched.push(ch);
+                    node = next;
+                    if let Some(func) = &node.value {
+                        last_match = Some((matched.clone(), func.clone()));
                     }
-                    None => break,
                 }
+                // No further match possible from this path — stop immediately.
+                None => break,
             }
         }
 
-        best_match
+        last_match
     }
 
     /// Get all functions with a given prefix
@@ -495,13 +500,16 @@ impl MetadataManager {
         self.trie.read().unwrap().get_exact(name)
     }
 
-    /// Get function by prefix match
+    /// Get the longest registered function name that is a prefix of `text`,
+    /// matching strictly from the start of `text`.
     #[inline]
     pub fn get_prefix(&self, text: &str) -> Option<(String, Arc<Function>)> {
         self.trie.read().unwrap().get_prefix(text)
     }
 
-    /// Get function (tries exact first, then prefix)
+    /// Get function: tries exact match first, then prefix match from the start.
+    ///
+    /// Use `get_exact` when you need strict lookup (e.g. bracketed calls).
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
         let trie = self.trie.read().unwrap();
 
@@ -510,7 +518,7 @@ impl MetadataManager {
             return Some(func);
         }
 
-        // Try prefix match
+        // Try longest-prefix match from position 0
         trie.get_prefix(name).map(|(_, func)| func)
     }
 

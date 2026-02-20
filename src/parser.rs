@@ -293,6 +293,28 @@ impl ParseError {
 }
 
 // ============================================================================
+// Enum Validation Exemptions
+// ============================================================================
+
+/// Function/argument pairs that are exempt from enum validation.
+/// Each entry is `(function_name, arg_index)` where:
+///   - `function_name` includes the leading `$` and is matched case-insensitively.
+///   - `arg_index` is 0-based.
+///
+/// Add entries here to permanently suppress enum checks for specific arguments:
+///
+/// ```
+/// ("$send", 1),   // second argument of $send accepts any value
+/// ("$ping", 0),   // first argument of $ping accepts any value
+/// ```
+#[cfg(feature = "validation")]
+const ENUM_ACCEPTS: &[(&str, usize)] = &[
+    // ("$functionName", arg_index),
+    ("$color", 0),
+    ("$modifyChannelPerms", 2),
+];
+
+// ============================================================================
 // Parser
 // ============================================================================
 
@@ -692,7 +714,26 @@ impl<'src> Parser<'src> {
             };
 
             if let Some(ref metadata) = self.metadata {
-                if let Some(func) = metadata.get(&full_name) {
+                // ----------------------------------------------------------------
+                // Lookup strategy:
+                //
+                //   With brackets    → exact match only.
+                //     `$pingsmmonwind[]` must be registered verbatim; a function
+                //     whose name is merely a prefix (e.g. `$ping`) is NOT a match.
+                //     We still offer it as a "did you mean" hint in the error.
+                //
+                //   Without brackets → exact first, then longest-prefix match.
+                //     `$pingmsoko` will resolve to `$ping` when `$ping` is the
+                //     longest registered prefix of the written name.
+                // ----------------------------------------------------------------
+                let resolved = if has_brackets {
+                    metadata.get_exact(&full_name)
+                } else {
+                    // get() tries exact then prefix (both anchored at position 0)
+                    metadata.get(&full_name)
+                };
+
+                if let Some(func) = resolved {
                     self.validate_function_call(
                         &full_name,
                         &func,
@@ -701,17 +742,16 @@ impl<'src> Parser<'src> {
                         name_span,
                     );
                 } else if self.config.validate_functions {
-                    // Try to find the longest known-function prefix of the written name.
-                    // e.g. $getSHiodhwbubw -> matches $get when $get is registered.
-                    // get_prefix() uses the trie for efficient longest-prefix lookup.
-                    // Only try when the call has brackets so bare unknown names stay simple.
-                    let prefix_match: Option<String> = if has_brackets {
-                        metadata.get_prefix(&full_name).map(|(name, _)| name)
+                    // For bracketed calls we still try a prefix match so we can
+                    // offer a helpful "did you mean" hint.  For bare calls we
+                    // already attempted a prefix match above and got nothing.
+                    let hint: Option<String> = if has_brackets {
+                        metadata.get_prefix(&full_name).map(|(matched, _)| matched)
                     } else {
                         None
                     };
 
-                    if let Some(matched) = prefix_match {
+                    if let Some(matched) = hint {
                         self.errors.push(ParseError::new(
                             format!(
                                 "Unknown function: {} (did you mean {}?)",
@@ -852,6 +892,16 @@ impl<'src> Parser<'src> {
                 } else {
                     continue;
                 };
+
+                // Skip enum validation for (func_name, arg_index) pairs listed in
+                // ENUM_ACCEPTS. Comparison is case-insensitive on the function name
+                // so entries don't have to worry about `$Ping` vs `$ping`.
+                if ENUM_ACCEPTS
+                    .iter()
+                    .any(|&(f, idx)| idx == i && f.eq_ignore_ascii_case(func_name))
+                {
+                    continue;
+                }
 
                 // Use the argument's own span so the error underlines the bad value.
                 self.validate_enum_value(func_name, provided_arg, func_arg, provided_arg.span);
