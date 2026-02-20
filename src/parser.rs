@@ -698,12 +698,12 @@ impl<'src> Parser<'src> {
                         &func,
                         args.as_ref(),
                         has_brackets,
-                        span,
+                        name_span,
                     );
                 } else if self.config.validate_functions {
                     self.errors.push(ParseError::new(
                         format!("Unknown function: {}", full_name),
-                        span,
+                        name_span,
                         ErrorKind::UnknownFunction,
                     ));
                 }
@@ -713,7 +713,7 @@ impl<'src> Parser<'src> {
                         "Cannot validate function {}: no metadata available",
                         full_name
                     ),
-                    span,
+                    name_span,
                     ErrorKind::UnknownFunction,
                 ));
             }
@@ -742,7 +742,7 @@ impl<'src> Parser<'src> {
         func: &Function,
         args: Option<&Vec<Argument>>,
         has_brackets: bool,
-        span: Span,
+        name_span: Span,
     ) {
         // Validate brackets usage
         if self.config.validate_brackets {
@@ -751,7 +751,7 @@ impl<'src> Parser<'src> {
                     if !has_brackets {
                         self.errors.push(ParseError::new(
                             format!("{} requires brackets", name),
-                            span,
+                            name_span,
                             ErrorKind::BracketUsage,
                         ));
                     }
@@ -763,7 +763,7 @@ impl<'src> Parser<'src> {
                     if has_brackets {
                         self.errors.push(ParseError::new(
                             format!("{} does not accept brackets", name),
-                            span,
+                            name_span,
                             ErrorKind::BracketUsage,
                         ));
                     }
@@ -774,7 +774,7 @@ impl<'src> Parser<'src> {
         // Validate argument count and enums
         if (self.config.validate_arguments || self.config.validate_enums) && has_brackets {
             if let (Some(args), Some(func_args)) = (args, &func.args) {
-                self.validate_arguments(name, args, func_args, span);
+                self.validate_arguments(name, args, func_args, name_span);
             }
         }
     }
@@ -785,7 +785,7 @@ impl<'src> Parser<'src> {
         func_name: &str,
         provided_args: &[Argument],
         func_args: &[Arg],
-        span: Span,
+        name_span: Span,
     ) {
         let provided_count = provided_args.len();
 
@@ -807,7 +807,7 @@ impl<'src> Parser<'src> {
                         "{} requires at least {} argument(s), got {}",
                         func_name, required_count, provided_count
                     ),
-                    span,
+                    name_span,
                     ErrorKind::ArgumentCount,
                 ));
             } else if !has_rest && provided_count > max_count {
@@ -816,7 +816,7 @@ impl<'src> Parser<'src> {
                         "{} accepts at most {} argument(s), got {}",
                         func_name, max_count, provided_count
                     ),
-                    span,
+                    name_span,
                     ErrorKind::ArgumentCount,
                 ));
             }
@@ -832,13 +832,19 @@ impl<'src> Parser<'src> {
                     continue;
                 };
 
-                self.validate_enum_value(func_name, provided_arg, func_arg);
+                self.validate_enum_value(func_name, provided_arg, func_arg, name_span);
             }
         }
     }
 
     #[cfg(feature = "validation")]
-    fn validate_enum_value(&mut self, func_name: &str, arg: &Argument, func_arg: &Arg) {
+    fn validate_enum_value(
+        &mut self,
+        func_name: &str,
+        arg: &Argument,
+        func_arg: &Arg,
+        name_span: Span,
+    ) {
         if !func_arg.required.unwrap_or(false) && arg.is_empty() {
             return;
         }
@@ -859,13 +865,10 @@ impl<'src> Parser<'src> {
                 if !trimmed.is_empty() && !valid_values.contains(&trimmed.to_string()) {
                     self.errors.push(ParseError::new(
                         format!(
-                            "Invalid value '{}' for {} in {}. Expected one of: {}",
-                            trimmed,
-                            func_arg.name,
-                            func_name,
-                            valid_values.join(", ")
+                            "Invalid value for {} argument {}: expected one of {:?}",
+                            func_name, func_arg.name, valid_values
                         ),
-                        arg.span,
+                        name_span,
                         ErrorKind::EnumValue,
                     ));
                 }
@@ -937,12 +940,12 @@ impl<'src> Parser<'src> {
         matches!(name, "c" | "C" | "escape")
     }
 
-    fn parse_escape_function(&mut self, start: usize, name: String, _name_span: Span) -> AstNode {
+    fn parse_escape_function(&mut self, start: usize, name: String, name_span: Span) -> AstNode {
         if self.current_byte() != Some(b'[') {
             if self.config.validate_brackets {
                 self.errors.push(ParseError::new(
                     format!("${} requires brackets", name),
-                    Span::new(start, self.pos),
+                    name_span,
                     ErrorKind::BracketUsage,
                 ));
             }
@@ -965,7 +968,7 @@ impl<'src> Parser<'src> {
             if self.config.validate_brackets {
                 self.errors.push(ParseError::syntax(
                     format!("Unclosed '[' for ${}", name),
-                    Span::new(start, self.source.len()),
+                    name_span,
                 ));
             }
             self.pos = self.source.len();
