@@ -49,8 +49,6 @@ pub struct ValidationConfig {
     pub validate_functions: bool,
     /// Validate bracket usage (required/optional/forbidden)
     pub validate_brackets: bool,
-    /// Validate escape sequences are properly formed
-    pub validate_escapes: bool,
 }
 
 impl ValidationConfig {
@@ -61,7 +59,6 @@ impl ValidationConfig {
             validate_enums: true,
             validate_functions: true,
             validate_brackets: true,
-            validate_escapes: true,
         }
     }
 
@@ -72,7 +69,6 @@ impl ValidationConfig {
             validate_enums: false,
             validate_functions: false,
             validate_brackets: true,
-            validate_escapes: true,
         }
     }
 
@@ -83,7 +79,6 @@ impl ValidationConfig {
             || self.validate_enums
             || self.validate_functions
             || self.validate_brackets
-            || self.validate_escapes
     }
 }
 
@@ -125,6 +120,9 @@ pub struct Modifiers {
     pub silent: bool,
     pub negated: bool,
     pub count: Option<String>,
+    /// Span covering all modifier characters (e.g. `!#@[n]` before the name).
+    /// `None` if no modifiers were present.
+    pub span: Option<Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,8 +175,20 @@ pub enum AstNode {
     },
     FunctionCall {
         name: String,
+        /// Span of the function name identifier including any modifier characters (excludes `$`).
+        name_span: Span,
+        /// Span of the modifier characters between `$` and the name (e.g. `!#@[2]`).
+        /// `None` when no modifiers are present.
+        modifier_span: Option<Span>,
+        /// Span of the argument list including the surrounding `[` and `]`.
+        /// `None` when the function was called without brackets.
+        args_span: Option<Span>,
         args: Option<Vec<Argument>>,
         modifiers: Modifiers,
+        /// Full span from the start of modifiers to the closing `]` (or end of name when no args).
+        /// This is the function call without the leading `$`.
+        full_span: Span,
+        /// Full span from `$` to the closing `]` (or end of name when no args).
         span: Span,
     },
     JavaScript {
@@ -215,8 +225,24 @@ impl AstNode {
             | AstNode::Escaped { span, .. } => {
                 span.offset(offset);
             }
-            AstNode::FunctionCall { args, span, .. } => {
+            AstNode::FunctionCall {
+                args,
+                span,
+                name_span,
+                modifier_span,
+                args_span,
+                full_span,
+                ..
+            } => {
                 span.offset(offset);
+                name_span.offset(offset);
+                full_span.offset(offset);
+                if let Some(ms) = modifier_span {
+                    ms.offset(offset);
+                }
+                if let Some(as_) = args_span {
+                    as_.offset(offset);
+                }
                 if let Some(args) = args {
                     for arg in args {
                         arg.span.offset(offset);
@@ -241,7 +267,6 @@ pub enum ErrorKind {
     EnumValue,
     UnknownFunction,
     BracketUsage,
-    InvalidEscape,
 }
 
 #[derive(Debug, Clone)]
@@ -550,7 +575,7 @@ impl<'src> Parser<'src> {
         self.advance(); // consume '\'
 
         if let Some(next) = self.current_byte() {
-            // If the next char is a backslash, we have a \\ pair (escaped backslash)
+            // Escaped backslash: \\ -> single \
             if next == b'\\' {
                 self.advance();
                 return Some(AstNode::Text {
@@ -558,7 +583,7 @@ impl<'src> Parser<'src> {
                     span: Span::new(start, self.pos),
                 });
             }
-            // If it escapes a special char
+            // Escaped special character
             if matches!(next, b'$' | b'[' | b']' | b';' | b'`') {
                 self.advance();
                 return Some(AstNode::Text {
@@ -566,18 +591,9 @@ impl<'src> Parser<'src> {
                     span: Span::new(start, self.pos),
                 });
             }
-
-            // Invalid escape sequence
-            if self.config.validate_escapes {
-                self.errors.push(ParseError::new(
-                    format!("Invalid escape sequence: \\{}", next as char),
-                    Span::new(start, start + 2),
-                    ErrorKind::InvalidEscape,
-                ));
-            }
         }
 
-        // Just a lone backslash
+        // Lone backslash or unrecognised escape — emit as-is with no error
         Some(AstNode::Text {
             content: "\\".to_string(),
             span: Span::new(start, start + 1),
@@ -616,8 +632,21 @@ impl<'src> Parser<'src> {
         let start = self.pos;
         self.advance(); // '$'
 
+        // Record where modifiers start (right after '$')
+        let modifier_start = self.pos;
         let modifiers = self.parse_modifiers();
+        let modifier_end = self.pos;
+
+        // modifier_span is Some only when modifier characters were actually consumed
+        let modifier_span = if modifier_end > modifier_start {
+            Some(Span::new(modifier_start, modifier_end))
+        } else {
+            None
+        };
+
+        // Record where the name begins and ends
         let name = self.parse_identifier();
+        let name_end = self.pos;
 
         if name.is_empty() {
             return AstNode::Text {
@@ -626,23 +655,36 @@ impl<'src> Parser<'src> {
             };
         }
 
+        // name_span now includes modifiers but excludes '$'
+        let name_span = Span::new(modifier_start, name_end);
+
         if self.is_escape_function(&name) {
-            return self.parse_escape_function(start, name);
+            return self.parse_escape_function(start, name, name_span);
         }
 
+        // Record bracket/args span
         let has_brackets = self.current_byte() == Some(b'[');
+        let bracket_open = self.pos;
+
         let args = if has_brackets {
             self.parse_function_arguments()
         } else {
             None
         };
 
+        let args_span = if has_brackets {
+            // self.pos now points just past the closing ']'
+            Some(Span::new(bracket_open, self.pos))
+        } else {
+            None
+        };
+
+        let full_span = Span::new(modifier_start, self.pos);
         let span = Span::new(start, self.pos);
 
         // Validate with metadata if available
         #[cfg(feature = "validation")]
         if self.config.is_enabled() {
-            // Add $ prefix if not present for validation
             let full_name = if name.starts_with('$') {
                 name.clone()
             } else {
@@ -666,7 +708,6 @@ impl<'src> Parser<'src> {
                     ));
                 }
             } else if self.config.validate_functions {
-                // Validation requested but no metadata available
                 self.errors.push(ParseError::new(
                     format!(
                         "Cannot validate function {}: no metadata available",
@@ -680,8 +721,12 @@ impl<'src> Parser<'src> {
 
         AstNode::FunctionCall {
             name,
+            name_span,
+            modifier_span,
+            args_span,
             args,
             modifiers,
+            full_span,
             span,
         }
     }
@@ -703,7 +748,6 @@ impl<'src> Parser<'src> {
         if self.config.validate_brackets {
             match func.brackets {
                 Some(true) => {
-                    // Brackets required
                     if !has_brackets {
                         self.errors.push(ParseError::new(
                             format!("{} requires brackets", name),
@@ -713,10 +757,9 @@ impl<'src> Parser<'src> {
                     }
                 }
                 Some(false) => {
-                    // Brackets optional (no error either way)
+                    // Brackets optional — no error either way
                 }
                 None => {
-                    // Brackets forbidden
                     if has_brackets {
                         self.errors.push(ParseError::new(
                             format!("{} does not accept brackets", name),
@@ -746,23 +789,17 @@ impl<'src> Parser<'src> {
     ) {
         let provided_count = provided_args.len();
 
-        // Check for rest parameter
         let has_rest = func_args.iter().any(|a| a.rest);
-
-        // Count required arguments
         let required_count = func_args
             .iter()
             .filter(|a| a.required.unwrap_or(false) && !a.rest)
             .count();
-
-        // Count total non-rest arguments
         let max_count = if has_rest {
             usize::MAX
         } else {
             func_args.len()
         };
 
-        // Validate argument count
         if self.config.validate_arguments {
             if provided_count < required_count {
                 self.errors.push(ParseError::new(
@@ -785,14 +822,11 @@ impl<'src> Parser<'src> {
             }
         }
 
-        // Validate enum values
         if self.config.validate_enums {
             for (i, provided_arg) in provided_args.iter().enumerate() {
-                // Get the corresponding function argument definition
                 let func_arg = if i < func_args.len() {
                     &func_args[i]
                 } else if has_rest {
-                    // Use last argument (rest parameter) for overflow
                     func_args.last().unwrap()
                 } else {
                     continue;
@@ -805,29 +839,23 @@ impl<'src> Parser<'src> {
 
     #[cfg(feature = "validation")]
     fn validate_enum_value(&mut self, func_name: &str, arg: &Argument, func_arg: &Arg) {
-        // Skip if not required and empty
         if !func_arg.required.unwrap_or(false) && arg.is_empty() {
             return;
         }
 
-        // Get enum values
         let enum_values = if let Some(enum_name) = &func_arg.enum_name {
-            // Get from metadata
             if let Some(ref metadata) = self.metadata {
                 metadata.get_enum(enum_name)
             } else {
                 None
             }
         } else {
-            // Use inline enum
             func_arg.arg_enum.clone()
         };
 
         if let Some(valid_values) = enum_values {
-            // Only validate if argument is pure text
             if let Some(text_value) = arg.as_text() {
                 let trimmed = text_value.trim();
-
                 if !trimmed.is_empty() && !valid_values.contains(&trimmed.to_string()) {
                     self.errors.push(ParseError::new(
                         format!(
@@ -851,6 +879,8 @@ impl<'src> Parser<'src> {
 
     fn parse_modifiers(&mut self) -> Modifiers {
         let mut modifiers = Modifiers::default();
+        let start = self.pos;
+
         loop {
             match self.current_byte() {
                 Some(b'!') => {
@@ -881,6 +911,12 @@ impl<'src> Parser<'src> {
                 _ => break,
             }
         }
+
+        let end = self.pos;
+        if end > start {
+            modifiers.span = Some(Span::new(start, end));
+        }
+
         modifiers
     }
 
@@ -901,7 +937,7 @@ impl<'src> Parser<'src> {
         matches!(name, "c" | "C" | "escape")
     }
 
-    fn parse_escape_function(&mut self, start: usize, name: String) -> AstNode {
+    fn parse_escape_function(&mut self, start: usize, name: String, _name_span: Span) -> AstNode {
         if self.current_byte() != Some(b'[') {
             if self.config.validate_brackets {
                 self.errors.push(ParseError::new(
@@ -1213,6 +1249,16 @@ pub fn parse_with_validation(
     metadata: Arc<MetadataManager>,
 ) -> (AstNode, Vec<ParseError>) {
     Parser::with_validation(source, config, metadata).parse()
+}
+
+/// Parse ForgeScript directly (no wrapper) with validation
+#[cfg(feature = "validation")]
+pub fn parse_forge_script_with_validation(
+    source: &str,
+    config: ValidationConfig,
+    metadata: Arc<MetadataManager>,
+) -> (AstNode, Vec<ParseError>) {
+    Parser::with_validation(source, config, metadata).parse_forge_script()
 }
 
 /// Parse with strict validation (requires "validation" feature)

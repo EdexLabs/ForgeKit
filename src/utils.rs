@@ -33,6 +33,7 @@ fn format_ast_impl(node: &AstNode, output: &mut String, depth: usize) {
             args,
             modifiers,
             span,
+            ..
         } => {
             output.push_str(&format!(
                 "{}FunctionCall ({}..{}): ${}{}{}{}\n",

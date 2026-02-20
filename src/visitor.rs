@@ -62,6 +62,7 @@ pub trait AstVisitor {
                 args,
                 modifiers,
                 span,
+                ..
             } => self.visit_function_call(name, args.as_ref(), modifiers, *span),
             AstNode::JavaScript { code, span } => self.visit_javascript(code, *span),
             AstNode::Escaped { content, span } => self.visit_escaped(content, *span),
@@ -152,6 +153,7 @@ pub trait AstVisitorMut {
                 args,
                 modifiers,
                 span,
+                ..
             } => self.visit_function_call_mut(name, args, modifiers, *span),
             AstNode::JavaScript { code, span } => self.visit_javascript_mut(code, *span),
             AstNode::Escaped { content, span } => self.visit_escaped_mut(content, *span),

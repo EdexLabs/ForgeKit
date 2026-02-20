@@ -410,14 +410,4 @@ mod validation_tests {
             Parser::with_validation("code: `$unknown[]`", config.clone(), metadata.clone()).parse();
         assert_eq!(errors[0].kind, ErrorKind::UnknownFunction);
     }
-
-    #[test]
-    fn test_validation_syntax_escapes() {
-        let config = ValidationConfig {
-            validate_escapes: true,
-            ..Default::default()
-        };
-        let (_ast, errors) = Parser::with_config("code: `\\z`", config.clone()).parse();
-        assert_eq!(errors[0].kind, ErrorKind::InvalidEscape);
-    }
 }
