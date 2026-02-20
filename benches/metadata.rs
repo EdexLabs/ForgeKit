@@ -10,7 +10,7 @@ fn create_mock_function(name: &str) -> Function {
         aliases: Some(vec![format!("$alias_{}", name)]),
         extension: Some("core".to_string()),
         source_url: None,
-        version: Some("1.0.0".to_string()).into(),
+        version: Some(serde_json::json!("1.0.0")),
         description: "Benchmark function".to_string(),
         brackets: Some(true),
         unwrap: true,
@@ -22,6 +22,7 @@ fn create_mock_function(name: &str) -> Function {
         deprecated: Some(false),
         local_path: None,
         line: None,
+        extra: todo!(),
     }
 }
 

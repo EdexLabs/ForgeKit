@@ -655,8 +655,8 @@ impl<'src> Parser<'src> {
             };
         }
 
-        // name_span now includes modifiers but excludes '$'
-        let name_span = Span::new(modifier_start, name_end);
+        // name_span includes '$' and modifiers up to end of name
+        let name_span = Span::new(start, name_end);
 
         if self.is_escape_function(&name) {
             return self.parse_escape_function(start, name, name_span);
@@ -701,11 +701,32 @@ impl<'src> Parser<'src> {
                         name_span,
                     );
                 } else if self.config.validate_functions {
-                    self.errors.push(ParseError::new(
-                        format!("Unknown function: {}", full_name),
-                        name_span,
-                        ErrorKind::UnknownFunction,
-                    ));
+                    // Try to find the longest known-function prefix of the written name.
+                    // e.g. $getSHiodhwbubw -> matches $get when $get is registered.
+                    // get_prefix() uses the trie for efficient longest-prefix lookup.
+                    // Only try when the call has brackets so bare unknown names stay simple.
+                    let prefix_match: Option<String> = if has_brackets {
+                        metadata.get_prefix(&full_name).map(|(name, _)| name)
+                    } else {
+                        None
+                    };
+
+                    if let Some(matched) = prefix_match {
+                        self.errors.push(ParseError::new(
+                            format!(
+                                "Unknown function: {} (did you mean {}?)",
+                                full_name, matched
+                            ),
+                            name_span,
+                            ErrorKind::UnknownFunction,
+                        ));
+                    } else {
+                        self.errors.push(ParseError::new(
+                            format!("Unknown function: {}", full_name),
+                            name_span,
+                            ErrorKind::UnknownFunction,
+                        ));
+                    }
                 }
             } else if self.config.validate_functions {
                 self.errors.push(ParseError::new(
@@ -832,7 +853,8 @@ impl<'src> Parser<'src> {
                     continue;
                 };
 
-                self.validate_enum_value(func_name, provided_arg, func_arg, name_span);
+                // Use the argument's own span so the error underlines the bad value.
+                self.validate_enum_value(func_name, provided_arg, func_arg, provided_arg.span);
             }
         }
     }
@@ -1004,13 +1026,19 @@ impl<'src> Parser<'src> {
         let mut depth = 0;
         let bytes = content.as_bytes();
         let mut i = 0;
-        let mut arg_start = 0;
+        // `arg_start` and `arg_end` are byte indices into `content`.
+        // We track `arg_end` explicitly so spans are correct even when
+        // `current` has been built by pushing individual chars (which may
+        // not equal i - arg_start for multi-byte sequences or newlines).
+        let mut arg_start = 0usize;
+        let mut arg_end = 0usize; // inclusive end index (past the last byte of this arg)
 
         while i < bytes.len() {
             if bytes[i] == b'$' && depth == 0 {
                 if let Some(esc_end) = self.find_escape_function_end(content, i) {
                     current.push_str(&content[i..=esc_end]);
                     i = esc_end + 1;
+                    arg_end = i;
                     continue;
                 }
             }
@@ -1020,11 +1048,13 @@ impl<'src> Parser<'src> {
                     if matches!(*next, b'`' | b'$' | b'[' | b']' | b';' | b'\\') {
                         current.push_str(&content[i..i + 2]);
                         i += 2;
+                        arg_end = i;
                         continue;
                     }
                 }
                 current.push('\\');
                 i += 1;
+                arg_end = i;
                 continue;
             }
 
@@ -1032,32 +1062,49 @@ impl<'src> Parser<'src> {
                 b'[' if !is_escaped(content, i) && self.is_function_bracket(content, i) => {
                     depth += 1;
                     current.push('[');
+                    arg_end = i + 1;
                 }
                 b']' if depth > 0 && !is_escaped(content, i) => {
                     depth -= 1;
                     current.push(']');
+                    arg_end = i + 1;
                 }
                 b';' if depth == 0 => {
                     let arg_offset = base_offset + arg_start;
+                    let arg_len = arg_end - arg_start;
                     let parts = self.parse_argument_parts(&current, arg_offset);
                     args.push(Argument {
                         parts,
-                        span: Span::new(arg_offset, arg_offset + current.len()),
+                        span: Span::new(arg_offset, arg_offset + arg_len),
                     });
                     current.clear();
                     arg_start = i + 1;
+                    arg_end = i + 1;
                 }
-                _ => current.push(bytes[i] as char),
+                _ => {
+                    // For multi-byte UTF-8 we must push the full char worth of bytes.
+                    // Since we are working with raw bytes we need to find the char boundary.
+                    let ch_len = content[i..]
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1);
+                    current.push_str(&content[i..i + ch_len]);
+                    arg_end = i + ch_len;
+                    // advance by ch_len - 1 extra; the loop does +1 below
+                    i += ch_len - 1;
+                }
             }
             i += 1;
         }
 
         if !current.is_empty() || !args.is_empty() {
             let arg_offset = base_offset + arg_start;
+            let arg_len = arg_end - arg_start;
             let parts = self.parse_argument_parts(&current, arg_offset);
             args.push(Argument {
                 parts,
-                span: Span::new(arg_offset, arg_offset + current.len()),
+                span: Span::new(arg_offset, arg_offset + arg_len),
             });
         }
         args
