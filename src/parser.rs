@@ -34,6 +34,32 @@ pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
     count % 2 != 0
 }
 
+/// Returns the number of bytes consumed by an escape sequence starting at `pos`.
+///
+/// Escape rules:
+/// - `\\$` → 3 bytes  (escaped dollar sign → literal `$`)
+/// - `\\]` → 3 bytes  (escaped closing bracket → literal `]`)
+/// - `` \` `` → 2 bytes  (escaped backtick → literal `` ` ``)
+/// - `\\`  → 2 bytes  (escaped backslash → literal `\`)
+/// - `\x`  → 1 byte   (lone backslash, not a recognised escape)
+///
+/// Returns 0 if `bytes[pos]` is not `\`.
+#[inline]
+fn escape_sequence_len(bytes: &[u8], pos: usize) -> usize {
+    if bytes.get(pos) != Some(&b'\\') {
+        return 0;
+    }
+    match bytes.get(pos + 1).copied() {
+        Some(b'\\') => match bytes.get(pos + 2).copied() {
+            Some(b'$') | Some(b']') => 3,
+            _ => 2,
+        },
+        Some(b'`') => 2,
+        Some(_) => 1,
+        None => 1,
+    }
+}
+
 // ============================================================================
 // Validation Configuration
 // ============================================================================
@@ -297,22 +323,8 @@ impl ParseError {
 // ============================================================================
 
 /// Function/argument pairs that are exempt from enum validation.
-/// Each entry is `(function_name, arg_index)` where:
-///   - `function_name` includes the leading `$` and is matched case-insensitively.
-///   - `arg_index` is 0-based.
-///
-/// Add entries here to permanently suppress enum checks for specific arguments:
-///
-/// ```
-/// ("$send", 1),   // second argument of $send accepts any value
-/// ("$ping", 0),   // first argument of $ping accepts any value
-/// ```
 #[cfg(feature = "validation")]
-const ENUM_ACCEPTS: &[(&str, usize)] = &[
-    // ("$functionName", arg_index),
-    ("$color", 0),
-    ("$modifyChannelPerms", 2),
-];
+const ENUM_ACCEPTS: &[(&str, usize)] = &[("$color", 0), ("$modifyChannelPerms", 2)];
 
 // ============================================================================
 // Parser
@@ -515,11 +527,6 @@ impl<'src> Parser<'src> {
         &self.source[start..end.min(self.source.len())]
     }
 
-    #[inline]
-    fn is_escaped_at(&self, pos: usize) -> bool {
-        is_escaped(self.source, pos)
-    }
-
     fn find_code_block_start(&self) -> Option<usize> {
         let mut p = self.pos;
         while p + 7 <= self.bytes.len() {
@@ -538,10 +545,22 @@ impl<'src> Parser<'src> {
         None
     }
 
+    /// Find the closing backtick of the current code block.
+    ///
+    /// A backtick is considered escaped (and therefore not a closer) when it is
+    /// preceded by a single `\` — i.e. `` \` ``.  Double-backslash before a
+    /// backtick (`\\` followed by `` ` ``) means the backslashes escape *each
+    /// other*, so the backtick is **not** escaped and does close the block.
     fn find_code_block_end(&self) -> Option<usize> {
         let mut p = self.pos;
         while p < self.bytes.len() {
-            if self.bytes[p] == b'`' && !is_escaped(self.source, p) {
+            if self.bytes[p] == b'\\' {
+                // Skip the full escape sequence so we don't mistake an escaped
+                // backtick (`` \` ``) for a block terminator.
+                p += escape_sequence_len(self.bytes, p).max(1);
+                continue;
+            }
+            if self.bytes[p] == b'`' {
                 return Some(p);
             }
             p += 1;
@@ -554,13 +573,14 @@ impl<'src> Parser<'src> {
     // ========================================================================
 
     fn parse_forge_node(&mut self) -> Option<AstNode> {
-        // Handle backslash escapes explicitly
+        // Handle backslash escapes first — this consumes the backslash and the
+        // escaped character(s) in one go, so subsequent checks never see them.
         if self.current_byte() == Some(b'\\') {
             return self.parse_escape_sequence();
         }
 
-        // Handle $ sequences
-        if self.current_byte() == Some(b'$') && !self.is_escaped_at(self.pos) {
+        // Any `$` we see here is real (escaped ones were consumed above).
+        if self.current_byte() == Some(b'$') {
             if self.peek_byte(1) == Some(b'{') {
                 return Some(self.parse_javascript());
             }
@@ -573,10 +593,13 @@ impl<'src> Parser<'src> {
     fn parse_text(&mut self) -> Option<AstNode> {
         let start = self.pos;
         while !self.is_eof() {
+            // Stop at a backslash — the escape handler must deal with it.
             if self.current_byte() == Some(b'\\') {
                 break;
             }
-            if self.current_byte() == Some(b'$') && !self.is_escaped_at(self.pos) {
+            // Stop at `$` — every `$` at this point is real (escaped ones were
+            // already consumed by parse_escape_sequence in the caller loop).
+            if self.current_byte() == Some(b'$') {
                 break;
             }
             self.advance();
@@ -592,34 +615,60 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Parse a backslash-led escape sequence.
+    ///
+    /// | Source text | Emitted text | Bytes consumed |
+    /// |-------------|--------------|----------------|
+    /// | `` \` ``    | `` ` ``      | 2              |
+    /// | `\\$`       | `$`          | 3              |
+    /// | `\\]`       | `]`          | 3              |
+    /// | `\\`        | `\`          | 2              |
+    /// | `\x` (other)| `\`          | 1 (only the backslash; `x` re-parsed next) |
     fn parse_escape_sequence(&mut self) -> Option<AstNode> {
         let start = self.pos;
-        self.advance(); // consume '\'
+        self.advance(); // consume the leading `\`
 
-        if let Some(next) = self.current_byte() {
-            // Escaped backslash: \\ -> single \
-            if next == b'\\' {
+        match self.current_byte() {
+            // \` → literal backtick
+            Some(b'`') => {
                 self.advance();
-                return Some(AstNode::Text {
-                    content: "\\".to_string(),
+                Some(AstNode::Text {
+                    content: "`".to_string(),
                     span: Span::new(start, self.pos),
-                });
+                })
             }
-            // Escaped special character
-            if matches!(next, b'$' | b'[' | b']' | b';' | b'`') {
-                self.advance();
-                return Some(AstNode::Text {
-                    content: self.slice(start + 1, self.pos).to_string(),
-                    span: Span::new(start, self.pos),
-                });
+
+            // \\ → either \\$ / \\] (escape for those chars) or just a literal `\`
+            Some(b'\\') => {
+                match self.peek_byte(1) {
+                    Some(b'$') | Some(b']') => {
+                        // \\$ or \\] — consume second `\` and the target char
+                        let ch = self.peek_byte(1).unwrap() as char;
+                        self.advance(); // second `\`
+                        self.advance(); // `$` or `]`
+                        Some(AstNode::Text {
+                            content: ch.to_string(),
+                            span: Span::new(start, self.pos),
+                        })
+                    }
+                    _ => {
+                        // \\ alone → single literal backslash
+                        self.advance(); // second `\`
+                        Some(AstNode::Text {
+                            content: "\\".to_string(),
+                            span: Span::new(start, self.pos),
+                        })
+                    }
+                }
             }
+
+            // Lone backslash or unrecognised sequence — emit the `\` and let the
+            // next character be re-parsed normally (so `\$func` → `\` text + call).
+            _ => Some(AstNode::Text {
+                content: "\\".to_string(),
+                span: Span::new(start, start + 1),
+            }),
         }
-
-        // Lone backslash or unrecognised escape — emit as-is with no error
-        Some(AstNode::Text {
-            content: "\\".to_string(),
-            span: Span::new(start, start + 1),
-        })
     }
 
     fn parse_javascript(&mut self) -> AstNode {
@@ -714,22 +763,9 @@ impl<'src> Parser<'src> {
             };
 
             if let Some(ref metadata) = self.metadata {
-                // ----------------------------------------------------------------
-                // Lookup strategy:
-                //
-                //   With brackets    → exact match only.
-                //     `$pingsmmonwind[]` must be registered verbatim; a function
-                //     whose name is merely a prefix (e.g. `$ping`) is NOT a match.
-                //     We still offer it as a "did you mean" hint in the error.
-                //
-                //   Without brackets → exact first, then longest-prefix match.
-                //     `$pingmsoko` will resolve to `$ping` when `$ping` is the
-                //     longest registered prefix of the written name.
-                // ----------------------------------------------------------------
                 let resolved = if has_brackets {
                     metadata.get_exact(&full_name)
                 } else {
-                    // get() tries exact then prefix (both anchored at position 0)
                     metadata.get(&full_name)
                 };
 
@@ -742,9 +778,6 @@ impl<'src> Parser<'src> {
                         name_span,
                     );
                 } else if self.config.validate_functions {
-                    // For bracketed calls we still try a prefix match so we can
-                    // offer a helpful "did you mean" hint.  For bare calls we
-                    // already attempted a prefix match above and got nothing.
                     let hint: Option<String> = if has_brackets {
                         metadata.get_prefix(&full_name).map(|(matched, _)| matched)
                     } else {
@@ -893,9 +926,6 @@ impl<'src> Parser<'src> {
                     continue;
                 };
 
-                // Skip enum validation for (func_name, arg_index) pairs listed in
-                // ENUM_ACCEPTS. Comparison is case-insensitive on the function name
-                // so entries don't have to worry about `$Ping` vs `$ping`.
                 if ENUM_ACCEPTS
                     .iter()
                     .any(|&(f, idx)| idx == i && f.eq_ignore_ascii_case(func_name))
@@ -903,7 +933,6 @@ impl<'src> Parser<'src> {
                     continue;
                 }
 
-                // Use the argument's own span so the error underlines the bad value.
                 self.validate_enum_value(func_name, provided_arg, func_arg, provided_arg.span);
             }
         }
@@ -1073,17 +1102,30 @@ impl<'src> Parser<'src> {
     fn parse_arguments(&mut self, content: &str, base_offset: usize) -> Vec<Argument> {
         let mut args = Vec::new();
         let mut current = String::new();
-        let mut depth = 0;
+        let mut depth = 0usize;
         let bytes = content.as_bytes();
         let mut i = 0;
-        // `arg_start` and `arg_end` are byte indices into `content`.
-        // We track `arg_end` explicitly so spans are correct even when
-        // `current` has been built by pushing individual chars (which may
-        // not equal i - arg_start for multi-byte sequences or newlines).
         let mut arg_start = 0usize;
-        let mut arg_end = 0usize; // inclusive end index (past the last byte of this arg)
+        let mut arg_end = 0usize;
 
         while i < bytes.len() {
+            // ----------------------------------------------------------------
+            // Escape sequences — consume the full sequence and pass it through
+            // verbatim so that parse_argument_parts can re-interpret it.
+            // ----------------------------------------------------------------
+            if bytes[i] == b'\\' {
+                let skip = escape_sequence_len(bytes, i).max(1);
+                let end = (i + skip).min(bytes.len());
+                current.push_str(&content[i..end]);
+                i = end;
+                arg_end = i;
+                continue;
+            }
+
+            // ----------------------------------------------------------------
+            // Escape-function shorthand: $c[...] / $escape[...] inside args.
+            // Track it as an opaque blob so its brackets don't confuse depth.
+            // ----------------------------------------------------------------
             if bytes[i] == b'$' && depth == 0 {
                 if let Some(esc_end) = self.find_escape_function_end(content, i) {
                     current.push_str(&content[i..=esc_end]);
@@ -1093,28 +1135,18 @@ impl<'src> Parser<'src> {
                 }
             }
 
-            if bytes[i] == b'\\' {
-                if let Some(next) = bytes.get(i + 1) {
-                    if matches!(*next, b'`' | b'$' | b'[' | b']' | b';' | b'\\') {
-                        current.push_str(&content[i..i + 2]);
-                        i += 2;
-                        arg_end = i;
-                        continue;
-                    }
-                }
-                current.push('\\');
-                i += 1;
-                arg_end = i;
-                continue;
-            }
-
             match bytes[i] {
-                b'[' if !is_escaped(content, i) && self.is_function_bracket(content, i) => {
+                // Only increment depth for brackets that are attached to a
+                // function call (i.e. `$identifier[`).  A bare `[` is treated
+                // as literal content so users don't need to escape it.
+                b'[' if self.is_function_bracket(content, i) => {
                     depth += 1;
                     current.push('[');
                     arg_end = i + 1;
                 }
-                b']' if depth > 0 && !is_escaped(content, i) => {
+                // Only decrement depth when we are actually inside a nested
+                // function bracket.  A `]` at depth == 0 is literal content.
+                b']' if depth > 0 => {
                     depth -= 1;
                     current.push(']');
                     arg_end = i + 1;
@@ -1132,8 +1164,6 @@ impl<'src> Parser<'src> {
                     arg_end = i + 1;
                 }
                 _ => {
-                    // For multi-byte UTF-8 we must push the full char worth of bytes.
-                    // Since we are working with raw bytes we need to find the char boundary.
                     let ch_len = content[i..]
                         .chars()
                         .next()
@@ -1141,7 +1171,6 @@ impl<'src> Parser<'src> {
                         .unwrap_or(1);
                     current.push_str(&content[i..i + ch_len]);
                     arg_end = i + ch_len;
-                    // advance by ch_len - 1 extra; the loop does +1 below
                     i += ch_len - 1;
                 }
             }
@@ -1211,17 +1240,31 @@ impl<'src> Parser<'src> {
     // Matching Utilities
     // ========================================================================
 
+    /// Find the closing `]` that matches the `[` at `open_pos` in `self.source`.
+    ///
+    /// **Bracket counting rules** (fix for issue #2):
+    /// - Only `[` that are directly attached to a function call (i.e. preceded
+    ///   by `$identifier`) increment the depth counter.
+    /// - Bare `[` (not attached to a function) are treated as literal content
+    ///   and do **not** need a matching `]`, and do not affect depth.
+    /// - Any `]` at depth == 1 closes the outer bracket.
+    ///
+    /// **Escape handling** (fix for issue #1):
+    /// - `\\$` and `\\]` (3-byte sequences) are skipped entirely.
+    /// - `` \` `` and `\\` (2-byte sequences) are skipped.
+    /// - A lone `\` (1 byte) is skipped.
     fn find_matching_bracket(&self, open_pos: usize) -> Option<usize> {
-        let mut depth = 1;
+        let mut depth = 1usize;
         let mut p = open_pos + 1;
         while p < self.bytes.len() {
             if self.bytes[p] == b'\\' {
-                p += 2;
+                p += escape_sequence_len(self.bytes, p).max(1);
                 continue;
             }
-            if self.bytes[p] == b'[' && !is_escaped(self.source, p) {
+            // Only count `[` that belong to a function call.
+            if self.bytes[p] == b'[' && self.is_function_bracket(self.source, p) {
                 depth += 1;
-            } else if self.bytes[p] == b']' && !is_escaped(self.source, p) {
+            } else if self.bytes[p] == b']' {
                 depth -= 1;
                 if depth == 0 {
                     return Some(p);
@@ -1295,16 +1338,16 @@ impl<'src> Parser<'src> {
         if !self.is_escape_function(&content[name_start..p]) || bytes.get(p) != Some(&b'[') {
             return None;
         }
-        let mut depth = 1;
+        let mut depth = 1usize;
         p += 1;
         while p < bytes.len() {
             if bytes[p] == b'\\' {
-                p += 2;
+                p += escape_sequence_len(bytes, p).max(1);
                 continue;
             }
-            if bytes[p] == b'[' && !is_escaped(content, p) {
+            if bytes[p] == b'[' && self.is_function_bracket(content, p) {
                 depth += 1;
-            } else if bytes[p] == b']' && !is_escaped(content, p) {
+            } else if bytes[p] == b']' {
                 depth -= 1;
                 if depth == 0 {
                     return Some(p);

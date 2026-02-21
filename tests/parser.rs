@@ -98,10 +98,54 @@ mod tests {
         assert!(contains_javascript(&ast));
     }
 
+    /// \` escapes a backtick — the backtick is emitted as literal text and does
+    /// NOT close the surrounding context.
     #[test]
-    fn test_escape_sequence() {
-        let (_ast, errors) = parse("\\`escaped\\`");
+    fn test_escape_backtick() {
+        // Outside a code block: \` should be a literal backtick in plain text.
+        let (ast, errors) = parse("before \\` after");
         assert!(errors.is_empty());
+        if let AstNode::Program { body, .. } = ast {
+            // Depending on how text nodes are merged, there may be 1–3 text nodes;
+            // the important thing is that the backtick appears in the output and
+            // no errors are raised.
+            let text: String = body
+                .iter()
+                .filter_map(|n| {
+                    if let AstNode::Text { content, .. } = n {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(text.contains('`'), "Expected a literal backtick in output");
+        }
+    }
+
+    /// \` inside a code block does NOT terminate the block.
+    #[test]
+    fn test_escape_backtick_in_code_block() {
+        // The backtick after \\ is escaped; the second backtick closes the block.
+        let (ast, errors) = parse("code: `hello\\`world`");
+        assert!(errors.is_empty(), "Errors: {:?}", errors);
+        if let AstNode::Program { body, .. } = ast {
+            let texts: Vec<&str> = body
+                .iter()
+                .filter_map(|n| {
+                    if let AstNode::Text { content, .. } = n {
+                        Some(content.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let combined = texts.join("");
+            assert!(
+                combined.contains('`'),
+                "Escaped backtick should appear as literal content"
+            );
+        }
     }
 
     #[test]
@@ -151,15 +195,96 @@ mod tests {
         assert_eq!(counter.text_nodes, 2);
     }
 
+    /// `\\$` suppresses the dollar sign — it becomes literal `$` text rather than
+    /// beginning a function call.
     #[test]
-    fn test_recursive_escapes() {
+    fn test_escaped_dollar_is_literal() {
+        // Rust `"\\\\$userName"` inside a code block = chars `\\$userName`.
+        // `\\$` (3 source bytes) → literal `$`.
+        // `userName` is then plain text (no leading `$`).
         let (ast, errors) = parse("code: `\\\\$userName`");
-        assert!(errors.is_empty());
+        assert!(errors.is_empty(), "Errors: {:?}", errors);
+
+        // The block contains `\\$userName`:
+        //   \\  → Text("\\")   (first, via the `\\` → `\` rule)
+        // Wait — `\\$` is 3-byte rule that wins. Let's be precise.
+        // escape_sequence_len sees `\`, then `\`, then `$` → returns 3 → emits `$`.
+        // So `\\$userName` → Text("$") + Text("userName") = effectively "$userName" text.
+        //
+        // But `\\$userName` Rust string is actually two chars `\\` then `$userName`.
+        // We need `\\` then `$` then `userName` which is Rust `"\\\\$userName"`.
+        // That IS our input. inner = `\\$userName` (2 backslashes, then dollar, then name).
+        // escape_sequence_len at 0: bytes[0]=`\`, bytes[1]=`\`, bytes[2]=`$` → len=3, emit `$`.
+        // Remaining: `userName` → plain text.
+        // So: Text("$") + Text("userName") or merged into Text("$userName").
+        // Either way NO FunctionCall node.
 
         if let AstNode::Program { body, .. } = ast {
-            assert_eq!(body.len(), 2);
+            let has_function_call = body
+                .iter()
+                .any(|n| matches!(n, AstNode::FunctionCall { .. }));
+            assert!(
+                !has_function_call,
+                "\\\\$ should suppress the function call — expected no FunctionCall node"
+            );
+            let full_text: String = body
+                .iter()
+                .filter_map(|n| {
+                    if let AstNode::Text { content, .. } = n {
+                        Some(content.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(
+                full_text.contains('$'),
+                "Escaped dollar should appear as literal `$` in output"
+            );
+        }
+    }
+
+    /// Single `\` followed by `$func` — the backslash is emitted as-is (lone
+    /// backslash rule) and `$func` is parsed as a normal function call.
+    #[test]
+    fn test_lone_backslash_then_function() {
+        // Rust `"\\$func"` inside the block = `\$func` (one backslash, then `$func`).
+        // escape_sequence_len at 0: bytes[0]=`\`, bytes[1]=`$` → not `\` → len=1.
+        // Emits `\` as text, then `$func` is a function call.
+        let (ast, errors) = parse("code: `\\$func`");
+        assert!(errors.is_empty(), "Errors: {:?}", errors);
+
+        if let AstNode::Program { body, .. } = ast {
+            assert_eq!(body.len(), 2, "Expected a text node and a function call");
             assert!(matches!(body[0], AstNode::Text { .. }));
+            if let AstNode::Text { content, .. } = &body[0] {
+                assert_eq!(content, "\\");
+            }
             assert!(matches!(body[1], AstNode::FunctionCall { .. }));
+        }
+    }
+
+    /// `\\]` inside function arguments produces a literal `]` without closing
+    /// the argument list.
+    #[test]
+    fn test_escaped_closing_bracket_in_args() {
+        // Source: $func[hello\\]world]
+        // `\\]` → literal `]`, then `world` is still inside the arg, then `]` closes.
+        let (ast, errors) = parse("code: `$func[hello\\\\]world]`");
+        assert!(errors.is_empty(), "Errors: {:?}", errors);
+
+        if let AstNode::Program { body, .. } = ast {
+            if let AstNode::FunctionCall { args, .. } = &body[0] {
+                let args = args.as_ref().expect("Expected arguments");
+                assert_eq!(args.len(), 1, "Should be one argument");
+                let text = args[0].as_text().unwrap_or_default();
+                assert!(
+                    text.contains(']'),
+                    "Escaped ] should appear as literal `]` in the argument"
+                );
+            } else {
+                panic!("Expected FunctionCall");
+            }
         }
     }
 
@@ -274,6 +399,75 @@ mod tests {
             assert_eq!(&input[span.start..span.end], "$func[]");
         }
     }
+
+    // =========================================================================
+    // Bare-bracket tests (Fix #2)
+    // =========================================================================
+
+    /// A bare `[` inside a function argument (not attached to `$identifier`)
+    /// must NOT be counted as an open bracket.  The argument list should parse
+    /// successfully without any "Unclosed function arguments" error.
+    #[test]
+    fn test_bare_bracket_in_args_no_error() {
+        // $ban[user; 1m; [some reason here]
+        // The `[` before "some reason" is bare (no `$` before it), so it is
+        // literal text and does not require a matching `]`.
+        let (ast, errors) = parse("code: `$ban[user; 1m; []`");
+        assert!(
+            errors.is_empty(),
+            "Bare `[` in args should not cause an error: {:?}",
+            errors
+        );
+
+        if let AstNode::Program { body, .. } = ast {
+            if let AstNode::FunctionCall { args, name, .. } = &body[0] {
+                assert_eq!(name, "ban");
+                let args = args.as_ref().expect("Expected arguments");
+                assert_eq!(args.len(), 3, "Expected 3 arguments");
+                // Third argument contains the literal `[`
+                let third_text = args[2].as_text().unwrap_or_default();
+                assert!(
+                    third_text.contains('['),
+                    "Third arg should contain bare `[`"
+                );
+            } else {
+                panic!("Expected FunctionCall node");
+            }
+        }
+    }
+
+    /// The motivating example from the issue: an escaped `$get` inside an arg
+    /// (the `]` after `hello` is NOT a function bracket) should not trigger
+    /// "Unclosed function arguments".
+    #[test]
+    fn test_escaped_dollar_in_args_no_unclosed_error() {
+        // $attachment[$get[hello] \\$get[hello\\];hello]
+        //
+        // Breakdown of the first argument:
+        //   $get[hello]      — real nested call, brackets balanced.
+        //   ` `              — space (literal text).
+        //   \\$get[hello\\]  — \\$ escapes the dollar; `get[hello\\]` is plain text.
+        //                      The `]` at the end of `hello\\]` is a bare `]` at
+        //                      depth 0 inside the argument, which is just literal text.
+        // Second argument: `hello`.
+        let source = "code: `$attachment[$get[hello] \\\\$get[hello\\\\];hello]`";
+        let (ast, errors) = parse(source);
+        assert!(
+            errors.is_empty(),
+            "Escaped $ in args must not cause unclosed-bracket errors: {:?}",
+            errors
+        );
+
+        if let AstNode::Program { body, .. } = ast {
+            if let AstNode::FunctionCall { args, name, .. } = &body[0] {
+                assert_eq!(name, "attachment");
+                let args = args.as_ref().expect("Expected arguments");
+                assert_eq!(args.len(), 2, "Expected 2 arguments");
+            } else {
+                panic!("Expected FunctionCall");
+            }
+        }
+    }
 }
 
 #[cfg(feature = "validation")]
@@ -358,6 +552,23 @@ mod validation_tests {
         }
     }
 
+    /// A \` inside a code block should NOT trigger an "Unclosed code block" error
+    /// because the backtick is escaped.
+    #[test]
+    fn test_escaped_backtick_does_not_close_block() {
+        // code: `hello\`still_inside` — the \` is escaped, block closes at the final `.
+        let (_, errors) = Parser::with_config(
+            "code: `hello\\`still_inside`",
+            ValidationConfig::syntax_only(),
+        )
+        .parse();
+        assert!(
+            errors.is_empty(),
+            "Escaped backtick must not close the code block: {:?}",
+            errors
+        );
+    }
+
     #[test]
     fn test_validation_argument_count() {
         let metadata = create_mock_metadata();
@@ -409,5 +620,18 @@ mod validation_tests {
         let (_ast, errors) =
             Parser::with_validation("code: `$unknown[]`", config.clone(), metadata.clone()).parse();
         assert_eq!(errors[0].kind, ErrorKind::UnknownFunction);
+    }
+
+    /// Bare brackets in args must not cause false positives in syntax-only mode.
+    #[test]
+    fn test_bare_brackets_no_syntax_error() {
+        let (_, errors) =
+            Parser::with_config("code: `$ban[user; 1m; []`", ValidationConfig::syntax_only())
+                .parse();
+        assert!(
+            errors.is_empty(),
+            "Bare `[` in args should not produce a syntax error: {:?}",
+            errors
+        );
     }
 }
