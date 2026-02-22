@@ -223,6 +223,26 @@ impl FunctionTrie {
         self.count == 0
     }
 
+    /// Remove an exact match from the trie
+    pub fn remove(&mut self, key: &str) -> bool {
+        let mut node = &mut self.root;
+
+        for ch in key.to_lowercase().chars() {
+            match node.children.get_mut(&ch) {
+                Some(next) => node = next,
+                None => return false,
+            }
+        }
+
+        if node.value.is_some() {
+            node.value = None;
+            self.count -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Clear all functions
     pub fn clear(&mut self) {
         self.root = TrieNode::default();
@@ -363,6 +383,7 @@ pub struct MetadataManager {
     events: DashMap<String, Event>,
     sources: std::sync::RwLock<Vec<MetadataSource>>,
     fetcher: Fetcher,
+    custom_function_names: DashMap<String, ()>,
 }
 
 impl MetadataManager {
@@ -374,6 +395,7 @@ impl MetadataManager {
             events: DashMap::new(),
             sources: std::sync::RwLock::new(Vec::new()),
             fetcher: Fetcher::new(),
+            custom_function_names: DashMap::new(),
         }
     }
 
@@ -454,6 +476,9 @@ impl MetadataManager {
         let mut trie = self.trie.write().unwrap();
 
         for func in functions {
+            if self.custom_function_names.contains_key(&func.name) {
+                continue;
+            }
             let arc_func = Arc::new(func.clone());
             trie.insert(&func.name, arc_func.clone());
 
@@ -472,38 +497,13 @@ impl MetadataManager {
         }
     }
 
-    // ========================================================================
-    // Custom Functions: ingest from JSON
-    // ========================================================================
-
-    /// Register custom functions from a JSON string.
-    ///
-    /// The JSON must be an array of `Function` objects — exactly the format that
-    /// [`generate_custom_functions_json`] produces.  This is the fast startup
-    /// path: generate the file once (build step / CLI), commit it, then load it
-    /// here at LSP startup with no JS/TS source parsing at runtime.
-    ///
-    /// ```json
-    /// [
-    ///   {
-    ///     "name": "$myFunc",
-    ///     "version": "1.0.0",
-    ///     "description": "Does something useful",
-    ///     "brackets": true,
-    ///     "unwrap": false,
-    ///     "args": [
-    ///       { "name": "value", "type": "String", "required": true, "rest": false }
-    ///     ]
-    ///   }
-    /// ]
-    /// ```
-    ///
-    /// Returns the number of successfully registered functions (invalid entries
-    /// are skipped and logged to stderr).
     pub fn add_custom_functions_from_json(&self, json: &str) -> Result<usize> {
         let raw_items: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| {
             MetadataError::ParseError(format!("Invalid custom-functions JSON: {}", e))
         })?;
+
+        // Remove previous custom functions first
+        self.remove_custom_functions();
 
         let mut count = 0;
         let mut trie = self.trie.write().unwrap();
@@ -515,10 +515,15 @@ impl MetadataManager {
                     if !func.name.starts_with('$') {
                         func.name = format!("${}", func.name);
                     }
+
                     func.category = func.category.or(Some("custom".to_string()));
 
                     let arc_func = Arc::new(func.clone());
+
+                    // Insert primary function
                     trie.insert(&func.name, arc_func.clone());
+                    self.custom_function_names.insert(func.name.clone(), ());
+
                     count += 1;
 
                     // Register aliases
@@ -529,9 +534,12 @@ impl MetadataManager {
                             } else {
                                 format!("${}", alias)
                             };
+
                             let mut alias_func = (*arc_func).clone();
                             alias_func.name = alias_name.clone();
+
                             trie.insert(&alias_name, Arc::new(alias_func));
+                            self.custom_function_names.insert(alias_name.clone(), ());
                         }
                     }
                 }
@@ -542,6 +550,16 @@ impl MetadataManager {
         }
 
         Ok(count)
+    }
+
+    pub fn remove_custom_functions(&self) {
+        let mut trie = self.trie.write().unwrap();
+
+        for entry in self.custom_function_names.iter() {
+            trie.remove(entry.key());
+        }
+
+        self.custom_function_names.clear();
     }
 
     /// Load custom-functions JSON from a file on disk and register every entry.
@@ -1023,11 +1041,14 @@ impl MetadataCache {
 
 impl MetadataManager {
     pub fn export_cache(&self) -> MetadataCache {
-        MetadataCache::new(
-            self.all_functions().iter().map(|f| (**f).clone()).collect(),
-            self.all_enums(),
-            self.all_events(),
-        )
+        let functions = self
+            .all_functions()
+            .into_iter()
+            .filter(|f| !self.custom_function_names.contains_key(&f.name))
+            .map(|f| (*f).clone())
+            .collect();
+
+        MetadataCache::new(functions, self.all_enums(), self.all_events())
     }
 
     pub fn import_cache(&self, cache: MetadataCache) -> Result<()> {
