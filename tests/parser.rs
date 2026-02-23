@@ -468,6 +468,61 @@ mod tests {
             }
         }
     }
+    /// `\\;` inside function arguments produces a literal `;` without splitting
+    /// into a new argument.
+    ///
+    /// Source: `$let[agent;Whee 1.0.1 rv:10102 (iPhone\\; iOS 16.2\\; en_US) Cronet]`
+    ///
+    /// The two `\\;` sequences each collapse to a literal `;`, so the entire
+    /// second token is one argument — not three.
+    #[test]
+    fn test_escaped_semicolon_in_args() {
+        // Rust string: "code: `$let[agent;Whee 1.0.1 rv:10102 (iPhone\\\\; iOS 16.2\\\\; en_US) Cronet]`"
+        // Inside the code block: $let[agent;Whee 1.0.1 rv:10102 (iPhone\\; iOS 16.2\\; en_US) Cronet]
+        // arg 0: "agent"
+        // arg 1: "Whee 1.0.1 rv:10102 (iPhone; iOS 16.2; en_US) Cronet"  (two \\; → literal ;)
+        let source =
+            "code: `$let[agent;Whee 1.0.1 rv:10102 (iPhone\\\\; iOS 16.2\\\\; en_US) Cronet]`";
+        let (ast, errors) = parse(source);
+        assert!(
+            errors.is_empty(),
+            "\\\\; should not cause parse errors: {:?}",
+            errors
+        );
+
+        if let AstNode::Program { body, .. } = ast {
+            if let AstNode::FunctionCall { name, args, .. } = &body[0] {
+                assert_eq!(name, "let");
+                let args = args.as_ref().expect("Expected arguments");
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "\\\\; must not split into a new argument — expected 2 args, got {}",
+                    args.len()
+                );
+
+                // First arg is plain "agent"
+                assert_eq!(args[0].as_text().as_deref(), Some("agent"));
+
+                // Second arg contains the literal semicolons produced by \\;
+                let second = args[1].as_text().unwrap_or_default();
+                assert!(
+                    second.contains(';'),
+                    "Escaped semicolons should appear as literal `;` in the argument text"
+                );
+                assert!(
+                    second.contains("iPhone"),
+                    "Argument should preserve surrounding text"
+                );
+                assert!(
+                    second.contains("en_US"),
+                    "Argument should preserve text after second escaped semicolon"
+                );
+            } else {
+                panic!("Expected FunctionCall node, got {:?}", body);
+            }
+        }
+    }
 }
 
 #[cfg(feature = "validation")]

@@ -644,10 +644,10 @@ impl<'src> Parser<'src> {
             Some(b'\\') => {
                 match self.peek_byte(1) {
                     Some(b'$') | Some(b']') | Some(b';') => {
-                        // \\$ or \\] or \\; — consume second `\` and the target char
+                        // \\$, \\], or \\; — consume second `\` and the target char
                         let ch = self.peek_byte(1).unwrap() as char;
                         self.advance(); // second `\`
-                        self.advance(); // `$` or `]` or `;`
+                        self.advance(); // `$`, `]`, or `;`
                         Some(AstNode::Text {
                             content: ch.to_string(),
                             span: Span::new(start, self.pos),
@@ -1114,6 +1114,9 @@ impl<'src> Parser<'src> {
             // ----------------------------------------------------------------
             // Escape sequences — consume the full sequence and pass it through
             // verbatim so that parse_argument_parts can re-interpret it.
+            // `\\;` (3 bytes) is handled here: escape_sequence_len returns 3,
+            // the whole sequence is pushed to `current`, and the `;` is never
+            // seen by the separator check below.
             // ----------------------------------------------------------------
             if bytes[i] == b'\\' {
                 let skip = escape_sequence_len(bytes, i).max(1);
@@ -1252,7 +1255,7 @@ impl<'src> Parser<'src> {
     /// - Any `]` at depth == 1 closes the outer bracket.
     ///
     /// **Escape handling** (fix for issue #1):
-    /// - `\\$` and `\\]` (3-byte sequences) are skipped entirely.
+    /// - `\\$`, `\\]`, and `\\;` (3-byte sequences) are skipped entirely.
     /// - `` \` `` and `\\` (2-byte sequences) are skipped.
     /// - A lone `\` (1 byte) is skipped.
     fn find_matching_bracket(&self, open_pos: usize) -> Option<usize> {
