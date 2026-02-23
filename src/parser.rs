@@ -39,6 +39,7 @@ pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
 /// Escape rules:
 /// - `\\$` → 3 bytes  (escaped dollar sign → literal `$`)
 /// - `\\]` → 3 bytes  (escaped closing bracket → literal `]`)
+/// - `\\;` → 3 bytes  (escaped semicolon → literal `;`)
 /// - `` \` `` → 2 bytes  (escaped backtick → literal `` ` ``)
 /// - `\\`  → 2 bytes  (escaped backslash → literal `\`)
 /// - `\x`  → 1 byte   (lone backslash, not a recognised escape)
@@ -51,7 +52,7 @@ fn escape_sequence_len(bytes: &[u8], pos: usize) -> usize {
     }
     match bytes.get(pos + 1).copied() {
         Some(b'\\') => match bytes.get(pos + 2).copied() {
-            Some(b'$') | Some(b']') => 3,
+            Some(b'$') | Some(b']') | Some(b';') => 3,
             _ => 2,
         },
         Some(b'`') => 2,
@@ -622,6 +623,7 @@ impl<'src> Parser<'src> {
     /// | `` \` ``    | `` ` ``      | 2              |
     /// | `\\$`       | `$`          | 3              |
     /// | `\\]`       | `]`          | 3              |
+    /// | `\\;`       | `;`          | 3              |
     /// | `\\`        | `\`          | 2              |
     /// | `\x` (other)| `\`          | 1 (only the backslash; `x` re-parsed next) |
     fn parse_escape_sequence(&mut self) -> Option<AstNode> {
@@ -638,14 +640,14 @@ impl<'src> Parser<'src> {
                 })
             }
 
-            // \\ → either \\$ / \\] (escape for those chars) or just a literal `\`
+            // \\ → either \\$ / \\] / \\; (escape for those chars) or just a literal `\`
             Some(b'\\') => {
                 match self.peek_byte(1) {
-                    Some(b'$') | Some(b']') => {
-                        // \\$ or \\] — consume second `\` and the target char
+                    Some(b'$') | Some(b']') | Some(b';') => {
+                        // \\$ or \\] or \\; — consume second `\` and the target char
                         let ch = self.peek_byte(1).unwrap() as char;
                         self.advance(); // second `\`
-                        self.advance(); // `$` or `]`
+                        self.advance(); // `$` or `]` or `;`
                         Some(AstNode::Text {
                             content: ch.to_string(),
                             span: Span::new(start, self.pos),
