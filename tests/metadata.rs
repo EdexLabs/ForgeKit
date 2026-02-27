@@ -62,6 +62,41 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata_source_persistence() {
+        let manager = MetadataManager::new();
+        let mut func = create_test_function("$test");
+        func.extension = Some("test_ext".to_string());
+        func.source_url = Some("http://example.com".to_string());
+        func.local_path = Some(std::path::PathBuf::from("/tmp/test.js"));
+        func.line = Some(42);
+
+        let cache = MetadataCache::new(vec![func.clone()], HashMap::new(), vec![]);
+        manager.import_cache(cache).expect("Import failed");
+
+        let saved = manager.get_exact("$test").expect("Function not found");
+        assert_eq!(saved.extension, Some("test_ext".to_string()));
+        assert_eq!(saved.source_url, Some("http://example.com".to_string()));
+        assert_eq!(
+            saved.local_path,
+            Some(std::path::PathBuf::from("/tmp/test.js"))
+        );
+        assert_eq!(saved.line, Some(42));
+
+        let exported = manager.export_cache();
+        let exported_func = &exported.functions[0];
+        assert_eq!(exported_func.extension, Some("test_ext".to_string()));
+        assert_eq!(
+            exported_func.source_url,
+            Some("http://example.com".to_string())
+        );
+        assert_eq!(
+            exported_func.local_path,
+            Some(std::path::PathBuf::from("/tmp/test.js"))
+        );
+        assert_eq!(exported_func.line, Some(42));
+    }
+
+    #[test]
     fn test_trie_case_insensitivity() {
         let mut trie = FunctionTrie::new();
         let func = Arc::new(create_test_function("$GetVar"));

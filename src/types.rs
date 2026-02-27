@@ -28,13 +28,13 @@ pub struct Function {
     pub examples: Option<Vec<String>>,
     #[serde(default)]
     pub deprecated: Option<bool>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_path: Option<PathBuf>,
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
     /// Capture any unrecognized keys so future JSON additions don't break deserialization
     #[serde(flatten)]
