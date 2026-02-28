@@ -529,19 +529,32 @@ impl<'src> Parser<'src> {
     }
 
     fn find_code_block_start(&self) -> Option<usize> {
-        let mut p = self.pos;
-        while p + 7 <= self.bytes.len() {
-            // Check for "code: `"
-            if &self.bytes[p..p + 7] == b"code: `" {
-                let preceded_by_valid = p == 0
-                    || self.bytes[p - 1].is_ascii_whitespace()
-                    || self.bytes[p - 1] == b'{'
-                    || self.bytes[p - 1] == b',';
-                if preceded_by_valid && !is_escaped(self.source, p + 6) {
-                    return Some(p);
+        let mut search_pos = self.pos;
+        while let Some(idx) = self.source[search_pos..].find("code:") {
+            let start = search_pos + idx;
+            let preceded_by_valid = start == 0
+                || self.bytes[start - 1].is_ascii_whitespace()
+                || self.bytes[start - 1] == b'{'
+                || self.bytes[start - 1] == b',';
+
+            if !preceded_by_valid {
+                search_pos = start + 5;
+                continue;
+            }
+            let mut i = start + 5;
+            while let Some(b) = self.bytes.get(i) {
+                if matches!(*b, b' ' | b'\t' | b'\n' | b'\r') {
+                    i += 1;
+                } else {
+                    break;
                 }
             }
-            p += 1;
+            if self.bytes.get(i) == Some(&b'`') {
+                if !is_escaped(self.source, i) {
+                    return Some(start);
+                }
+            }
+            search_pos = start + 5;
         }
         None
     }
