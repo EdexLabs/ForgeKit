@@ -52,6 +52,89 @@ pub fn parse_wasm(source: &str) -> JsValue {
     serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
 }
 
+/// Parse and return an error if there are any parse errors, otherwise return the AST string
+#[wasm_bindgen(js_name = "parseOrError")]
+pub fn parse_or_error_wasm(source: &str) -> JsValue {
+    match crate::parser::parse_with_errors(source) {
+        Ok(ast) => {
+            let result = serde_json::json!({
+                "ok": true,
+                "ast": format_ast(&ast),
+            });
+            serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+        }
+        Err(errors) => {
+            let errors_json: Vec<serde_json::Value> = errors
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "message": e.message,
+                        "span": { "start": e.span.start, "end": e.span.end },
+                        "kind": format!("{:?}", e.kind),
+                    })
+                })
+                .collect();
+            let result = serde_json::json!({
+                "ok": false,
+                "errors": errors_json,
+            });
+            serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+        }
+    }
+}
+
+/// Parse with a specific validation config object
+///
+/// `config` should be a JS object with boolean fields:
+/// `validateArguments`, `validateEnums`, `validateFunctions`, `validateBrackets`
+#[wasm_bindgen(js_name = "parseWithConfig")]
+pub fn parse_with_config_wasm(source: &str, config: JsValue) -> JsValue {
+    // Parse config from JS object
+    let validate_arguments = js_sys::Reflect::get(&config, &JsValue::from_str("validateArguments"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let validate_enums = js_sys::Reflect::get(&config, &JsValue::from_str("validateEnums"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let validate_functions = js_sys::Reflect::get(&config, &JsValue::from_str("validateFunctions"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let validate_brackets = js_sys::Reflect::get(&config, &JsValue::from_str("validateBrackets"))
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let cfg = ValidationConfig {
+        validate_arguments,
+        validate_enums,
+        validate_functions,
+        validate_brackets,
+    };
+
+    let (ast, errors) = crate::parser::parse_with_config(source, cfg);
+
+    let errors_json: Vec<serde_json::Value> = errors
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "message": e.message,
+                "span": { "start": e.span.start, "end": e.span.end },
+                "kind": format!("{:?}", e.kind),
+            })
+        })
+        .collect();
+
+    let result = serde_json::json!({
+        "ast": format_ast(&ast),
+        "errors": errors_json,
+    });
+
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
 /// Parse with validation (requires metadata)
 #[wasm_bindgen(js_name = "parseWithValidation")]
 pub fn parse_with_validation_wasm(
@@ -61,14 +144,12 @@ pub fn parse_with_validation_wasm(
     validate_enums: bool,
     validate_functions: bool,
     validate_brackets: bool,
-    validate_escapes: bool,
 ) -> JsValue {
     let config = ValidationConfig {
         validate_arguments,
         validate_enums,
         validate_functions,
         validate_brackets,
-        validate_escapes,
     };
 
     let (ast, errors) =
@@ -115,6 +196,36 @@ pub fn parse_strict_wasm(source: &str, metadata_wrapper: &MetadataManagerWrapper
     });
 
     serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// Return a strict ValidationConfig as a JS object
+///
+/// Returns `{ validateArguments: true, validateEnums: true, validateFunctions: true, validateBrackets: true }`
+#[wasm_bindgen(js_name = "validationConfigStrict")]
+pub fn validation_config_strict() -> JsValue {
+    let cfg = ValidationConfig::strict();
+    serde_json::json!({
+        "validateArguments": cfg.validate_arguments,
+        "validateEnums": cfg.validate_enums,
+        "validateFunctions": cfg.validate_functions,
+        "validateBrackets": cfg.validate_brackets,
+    })
+    .pipe(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
+}
+
+/// Return a syntax-only ValidationConfig as a JS object
+///
+/// Returns `{ validateArguments: false, validateEnums: false, validateFunctions: false, validateBrackets: false }`
+#[wasm_bindgen(js_name = "validationConfigSyntaxOnly")]
+pub fn validation_config_syntax_only() -> JsValue {
+    let cfg = ValidationConfig::syntax_only();
+    serde_json::json!({
+        "validateArguments": cfg.validate_arguments,
+        "validateEnums": cfg.validate_enums,
+        "validateFunctions": cfg.validate_functions,
+        "validateBrackets": cfg.validate_brackets,
+    })
+    .pipe(|v| serde_wasm_bindgen::to_value(&v).unwrap_or(JsValue::NULL))
 }
 
 // ============================================================================
@@ -189,7 +300,24 @@ impl MetadataManagerWrapper {
         })
     }
 
-    /// Get function by name
+    /// Add custom functions from a JSON string
+    ///
+    /// The JSON should be an array of Function objects.
+    /// Returns the number of functions added.
+    #[wasm_bindgen(js_name = "addCustomFunctionsFromJson")]
+    pub fn add_custom_functions_from_json(&self, json: &str) -> Result<usize, JsValue> {
+        self.manager
+            .add_custom_functions_from_json(json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Remove all custom functions previously added via `addCustomFunctionsFromJson`
+    #[wasm_bindgen(js_name = "removeCustomFunctions")]
+    pub fn remove_custom_functions(&self) {
+        self.manager.remove_custom_functions();
+    }
+
+    /// Get function by name (fuzzy / alias-aware)
     #[wasm_bindgen(js_name = "getFunction")]
     pub fn get_function(&self, name: &str) -> Option<String> {
         self.manager
@@ -205,6 +333,61 @@ impl MetadataManagerWrapper {
             .map(|f| serde_json::to_string(&*f).unwrap_or_else(|_| "{}".to_string()))
     }
 
+    /// Get the longest registered function name that is a prefix of `text`,
+    /// together with the matched key.
+    ///
+    /// Returns `{ key: string, function: Function } | null`
+    #[wasm_bindgen(js_name = "getFunctionPrefix")]
+    pub fn get_function_prefix(&self, text: &str) -> JsValue {
+        match self.manager.get_prefix(text) {
+            Some((key, func)) => {
+                let result = serde_json::json!({
+                    "key": key,
+                    "function": *func,
+                });
+                serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+            }
+            None => JsValue::NULL,
+        }
+    }
+
+    /// Get a function together with the key that matched (handles aliases).
+    ///
+    /// Returns `{ key: string, function: Function } | null`
+    #[wasm_bindgen(js_name = "getFunctionWithMatch")]
+    pub fn get_function_with_match(&self, name: &str) -> JsValue {
+        match self.manager.get_with_match(name) {
+            Some((key, func)) => {
+                let result = serde_json::json!({
+                    "key": key,
+                    "function": *func,
+                });
+                serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+            }
+            None => JsValue::NULL,
+        }
+    }
+
+    /// Get multiple functions by name in one call.
+    ///
+    /// Accepts a JS array of strings; returns a JS array where each element is
+    /// either a Function object or `null` if the name was not found.
+    #[wasm_bindgen(js_name = "getFunctionMany")]
+    pub fn get_function_many(&self, names: JsValue) -> JsValue {
+        let names: Vec<String> = match serde_wasm_bindgen::from_value(names) {
+            Ok(v) => v,
+            Err(_) => return JsValue::NULL,
+        };
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let results: Vec<Option<Function>> = self
+            .manager
+            .get_many(&name_refs)
+            .into_iter()
+            .map(|opt| opt.map(|f| (*f).clone()))
+            .collect();
+        serde_wasm_bindgen::to_value(&results).unwrap_or(JsValue::NULL)
+    }
+
     /// Get completions for prefix
     #[wasm_bindgen(js_name = "getCompletions")]
     pub fn get_completions(&self, prefix: &str) -> JsValue {
@@ -212,7 +395,7 @@ impl MetadataManagerWrapper {
             .manager
             .get_completions(prefix)
             .into_iter()
-            .map(|f| (*f).clone()) // Dereference and clone the inner Function
+            .map(|f| (*f).clone())
             .collect();
 
         serde_wasm_bindgen::to_value(&completions).unwrap_or(JsValue::NULL)
@@ -225,7 +408,7 @@ impl MetadataManagerWrapper {
             .manager
             .all_functions()
             .into_iter()
-            .map(|f| (*f).clone()) // Dereference and clone the inner Function
+            .map(|f| (*f).clone())
             .collect();
 
         serde_wasm_bindgen::to_value(&functions).unwrap_or(JsValue::NULL)
@@ -368,39 +551,126 @@ pub fn calculate_stats_wasm(source: &str) -> JsValue {
     serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
 }
 
-/// Format AST as string
+/// Format AST as human-readable string
 #[wasm_bindgen(js_name = "formatAst")]
 pub fn format_ast_wasm(source: &str) -> String {
     let (ast, _) = rust_parse(source);
     format_ast(&ast)
 }
 
-/// Count nodes in source
+/// Count total nodes in source
 #[wasm_bindgen(js_name = "countNodes")]
 pub fn count_nodes_wasm(source: &str) -> usize {
     let (ast, _) = rust_parse(source);
     crate::utils::count_nodes(&ast)
 }
 
-/// Check if source contains JavaScript
+/// Check if source contains JavaScript expressions
 #[wasm_bindgen(js_name = "containsJavaScript")]
 pub fn contains_javascript_wasm(source: &str) -> bool {
     let (ast, _) = rust_parse(source);
     crate::utils::contains_javascript(&ast)
 }
 
-/// Get max nesting depth
+/// Get the maximum function-nesting depth in source
 #[wasm_bindgen(js_name = "maxNestingDepth")]
 pub fn max_nesting_depth_wasm(source: &str) -> usize {
     let (ast, _) = rust_parse(source);
     crate::utils::max_nesting_depth(&ast)
 }
 
+/// Extract all text nodes from source.
+///
+/// Returns an array of `{ text: string, span: { start: number, end: number } }`.
+#[wasm_bindgen(js_name = "extractTextNodes")]
+pub fn extract_text_nodes_wasm(source: &str) -> JsValue {
+    let (ast, _) = rust_parse(source);
+    let nodes = crate::utils::extract_text_nodes(&ast);
+    let result: Vec<serde_json::Value> = nodes
+        .into_iter()
+        .map(|(text, span)| {
+            serde_json::json!({
+                "text": text,
+                "span": { "start": span.start, "end": span.end },
+            })
+        })
+        .collect();
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// Flatten the AST into a depth-first linear list of node descriptors.
+///
+/// Returns an array of objects, each with a `type` field and relevant fields
+/// for that node type.
+#[wasm_bindgen(js_name = "flattenAst")]
+pub fn flatten_ast_wasm(source: &str) -> JsValue {
+    use crate::parser::AstNode;
+
+    let (ast, _) = rust_parse(source);
+    let flat = crate::utils::flatten_ast(&ast);
+
+    let result: Vec<serde_json::Value> = flat
+        .iter()
+        .map(|node| match node {
+            AstNode::Program { span, .. } => serde_json::json!({
+                "type": "Program",
+                "span": { "start": span.start, "end": span.end },
+            }),
+            AstNode::Text { content, span } => serde_json::json!({
+                "type": "Text",
+                "content": content,
+                "span": { "start": span.start, "end": span.end },
+            }),
+            AstNode::FunctionCall {
+                name,
+                modifiers,
+                span,
+                ..
+            } => serde_json::json!({
+                "type": "FunctionCall",
+                "name": name,
+                "modifiers": {
+                    "silent": modifiers.silent,
+                    "negated": modifiers.negated,
+                    "count": modifiers.count,
+                },
+                "span": { "start": span.start, "end": span.end },
+            }),
+            AstNode::JavaScript { code, span } => serde_json::json!({
+                "type": "JavaScript",
+                "code": code,
+                "span": { "start": span.start, "end": span.end },
+            }),
+            AstNode::Escaped { content, span } => serde_json::json!({
+                "type": "Escaped",
+                "content": content,
+                "span": { "start": span.start, "end": span.end },
+            }),
+        })
+        .collect();
+
+    serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
+}
+
+/// Return the source-code slice for a given byte span.
+#[wasm_bindgen(js_name = "getSourceSlice")]
+pub fn get_source_slice_wasm(source: &str, start: usize, end: usize) -> String {
+    let span = crate::parser::Span { start, end };
+    crate::utils::get_source_slice(source, span).to_string()
+}
+
+/// Check whether the character at `byte_idx` in `source` is escaped
+/// (i.e. preceded by an odd number of backslashes).
+#[wasm_bindgen(js_name = "isEscaped")]
+pub fn is_escaped_wasm(source: &str, byte_idx: usize) -> bool {
+    crate::parser::is_escaped(source, byte_idx)
+}
+
 // ============================================================================
 // Visitor Pattern Helpers
 // ============================================================================
 
-/// Collect all function names using visitor
+/// Collect all function names using the visitor pattern
 #[wasm_bindgen(js_name = "collectFunctions")]
 pub fn collect_functions_wasm(source: &str) -> JsValue {
     let (ast, _) = rust_parse(source);
@@ -541,3 +811,18 @@ pub fn version() -> JsValue {
 
     serde_wasm_bindgen::to_value(&info).unwrap_or(JsValue::NULL)
 }
+
+// ============================================================================
+// Internal helpers
+// ============================================================================
+
+trait Pipe: Sized {
+    fn pipe<F, R>(self, f: F) -> R
+    where
+        F: FnOnce(Self) -> R,
+    {
+        f(self)
+    }
+}
+
+impl<T> Pipe for T {}
