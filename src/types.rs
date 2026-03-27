@@ -17,7 +17,7 @@ pub struct Function {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<Arg>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<Vec<String>>,
+    pub output: Option<JsonValue>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]

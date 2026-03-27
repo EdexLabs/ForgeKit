@@ -889,15 +889,20 @@ fn parse_functions_from_js_ts(content: &str, file_path: &str) -> Vec<Function> {
             .captures(chunk)
             .map(|c: regex::Captures| &c[1] == "true");
 
-        let output: Option<Vec<String>> = output_re.captures(chunk).map(|c: regex::Captures| {
-            c[1].split(',')
+        let output: Option<serde_json::Value> = output_re.captures(chunk).map(|c: regex::Captures| {
+            let parts: Vec<String> = c[1].split(',')
                 .map(|s: &str| {
                     s.trim()
                         .trim_matches(|c: char| c == '\'' || c == '"')
                         .to_string()
                 })
                 .filter(|s: &String| !s.is_empty())
-                .collect()
+                .collect();
+            if parts.len() == 1 {
+                serde_json::Value::String(parts[0].clone())
+            } else {
+                serde_json::Value::Array(parts.into_iter().map(serde_json::Value::String).collect())
+            }
         });
 
         // Parse args from the params block that belongs to this function chunk
