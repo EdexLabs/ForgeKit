@@ -528,19 +528,53 @@ impl<'src> Parser<'src> {
         &self.source[start..end.min(self.source.len())]
     }
 
+    fn is_in_js_comment(source: &str, pos: usize) -> bool {
+        let mut in_block = false;
+        let bytes = source.as_bytes();
+        let mut i = 0;
+        while i < pos {
+            if !in_block && bytes.get(i..i + 2) == Some(b"/*") {
+                in_block = true;
+                i += 2;
+            } else if in_block && bytes.get(i..i + 2) == Some(b"*/") {
+                in_block = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if in_block {
+            return true;
+        }
+
+        let line_start = source[..pos].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let line = &source[line_start..pos];
+        let mut j = 0;
+        let lb = line.as_bytes();
+        while j + 1 < lb.len() {
+            if lb[j] == b'/' && lb[j + 1] == b'/' {
+                return true;
+            }
+            j += 1;
+        }
+
+        false
+    }
+
     fn find_code_block_start(&self) -> Option<usize> {
         let mut search_pos = self.pos;
         while let Some(idx) = self.source[search_pos..].find("code:") {
             let start = search_pos + idx;
+
             let preceded_by_valid = start == 0
                 || self.bytes[start - 1].is_ascii_whitespace()
                 || self.bytes[start - 1] == b'{'
                 || self.bytes[start - 1] == b',';
-
             if !preceded_by_valid {
                 search_pos = start + 5;
                 continue;
             }
+
             let mut i = start + 5;
             while let Some(b) = self.bytes.get(i) {
                 if matches!(*b, b' ' | b'\t' | b'\n' | b'\r') {
@@ -549,11 +583,17 @@ impl<'src> Parser<'src> {
                     break;
                 }
             }
+
             if self.bytes.get(i) == Some(&b'`') {
                 if !is_escaped(self.source, i) {
+                    if Self::is_in_js_comment(self.source, start) {
+                        search_pos = start + 5;
+                        continue;
+                    }
                     return Some(start);
                 }
             }
+
             search_pos = start + 5;
         }
         None
