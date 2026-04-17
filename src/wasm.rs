@@ -25,12 +25,61 @@ pub fn init() {
 }
 
 // ============================================================================
+// Utf-16 Position Mapping (for JS interoperability)
+// ============================================================================
+
+use crate::parser::Span;
+
+/// Helper to map byte offsets (Rust/UTF-8) to code unit offsets (JS/UTF-16).
+///
+/// This is necessary because JS strings are UTF-16 and indices into them
+/// must be UTF-16 offsets, but the Rust parser returns byte offsets.
+struct Utf16Mapper {
+    byte_to_utf16: Vec<usize>,
+}
+
+impl Utf16Mapper {
+    fn new(s: &str) -> Self {
+        let mut mapping = Vec::with_capacity(s.len() + 1);
+        let mut current_utf16 = 0;
+        for c in s.chars() {
+            let u8_len = c.len_utf8();
+            let u16_len = c.len_utf16();
+            for _ in 0..u8_len {
+                mapping.push(current_utf16);
+            }
+            current_utf16 += u16_len;
+        }
+        mapping.push(current_utf16);
+        Self {
+            byte_to_utf16: mapping,
+        }
+    }
+
+    #[inline]
+    fn map(&self, byte_offset: usize) -> usize {
+        *self.byte_to_utf16
+            .get(byte_offset)
+            .unwrap_or(&self.byte_to_utf16.last().copied().unwrap_or(0))
+    }
+
+    #[inline]
+    fn map_span(&self, span: Span) -> serde_json::Value {
+        serde_json::json!({
+            "start": self.map(span.start),
+            "end": self.map(span.end),
+        })
+    }
+}
+
+// ============================================================================
 // Parser Bindings
 // ============================================================================
 
 /// Parse ForgeScript source code (no validation)
 #[wasm_bindgen(js_name = "parse")]
 pub fn parse_wasm(source: &str) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     let (ast, errors) = rust_parse(source);
 
     let errors_json: Vec<serde_json::Value> = errors
@@ -38,7 +87,7 @@ pub fn parse_wasm(source: &str) -> JsValue {
         .map(|e| {
             serde_json::json!({
                 "message": e.message,
-                "span": { "start": e.span.start, "end": e.span.end },
+                "span": mapper.map_span(e.span),
                 "kind": format!("{:?}", e.kind),
             })
         })
@@ -55,6 +104,7 @@ pub fn parse_wasm(source: &str) -> JsValue {
 /// Parse and return an error if there are any parse errors, otherwise return the AST string
 #[wasm_bindgen(js_name = "parseOrError")]
 pub fn parse_or_error_wasm(source: &str) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     match crate::parser::parse_with_errors(source) {
         Ok(ast) => {
             let result = serde_json::json!({
@@ -69,7 +119,7 @@ pub fn parse_or_error_wasm(source: &str) -> JsValue {
                 .map(|e| {
                     serde_json::json!({
                         "message": e.message,
-                        "span": { "start": e.span.start, "end": e.span.end },
+                        "span": mapper.map_span(e.span),
                         "kind": format!("{:?}", e.kind),
                     })
                 })
@@ -89,6 +139,7 @@ pub fn parse_or_error_wasm(source: &str) -> JsValue {
 /// `validateArguments`, `validateEnums`, `validateFunctions`, `validateBrackets`
 #[wasm_bindgen(js_name = "parseWithConfig")]
 pub fn parse_with_config_wasm(source: &str, config: JsValue) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     // Parse config from JS object
     let validate_arguments = js_sys::Reflect::get(&config, &JsValue::from_str("validateArguments"))
         .ok()
@@ -121,7 +172,7 @@ pub fn parse_with_config_wasm(source: &str, config: JsValue) -> JsValue {
         .map(|e| {
             serde_json::json!({
                 "message": e.message,
-                "span": { "start": e.span.start, "end": e.span.end },
+                "span": mapper.map_span(e.span),
                 "kind": format!("{:?}", e.kind),
             })
         })
@@ -145,6 +196,7 @@ pub fn parse_with_validation_wasm(
     validate_functions: bool,
     validate_brackets: bool,
 ) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     let config = ValidationConfig {
         validate_arguments,
         validate_enums,
@@ -160,7 +212,7 @@ pub fn parse_with_validation_wasm(
         .map(|e| {
             serde_json::json!({
                 "message": e.message,
-                "span": { "start": e.span.start, "end": e.span.end },
+                "span": mapper.map_span(e.span),
                 "kind": format!("{:?}", e.kind),
             })
         })
@@ -177,6 +229,7 @@ pub fn parse_with_validation_wasm(
 /// Parse with strict validation (all validations enabled)
 #[wasm_bindgen(js_name = "parseStrict")]
 pub fn parse_strict_wasm(source: &str, metadata_wrapper: &MetadataManagerWrapper) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     let (ast, errors) = crate::parser::parse_strict(source, metadata_wrapper.manager.clone());
 
     let errors_json: Vec<serde_json::Value> = errors
@@ -184,7 +237,7 @@ pub fn parse_strict_wasm(source: &str, metadata_wrapper: &MetadataManagerWrapper
         .map(|e| {
             serde_json::json!({
                 "message": e.message,
-                "span": { "start": e.span.start, "end": e.span.end },
+                "span": mapper.map_span(e.span),
                 "kind": format!("{:?}", e.kind),
             })
         })
@@ -584,6 +637,7 @@ pub fn max_nesting_depth_wasm(source: &str) -> usize {
 /// Returns an array of `{ text: string, span: { start: number, end: number } }`.
 #[wasm_bindgen(js_name = "extractTextNodes")]
 pub fn extract_text_nodes_wasm(source: &str) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     let (ast, _) = rust_parse(source);
     let nodes = crate::utils::extract_text_nodes(&ast);
     let result: Vec<serde_json::Value> = nodes
@@ -591,7 +645,7 @@ pub fn extract_text_nodes_wasm(source: &str) -> JsValue {
         .map(|(text, span)| {
             serde_json::json!({
                 "text": text,
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(span),
             })
         })
         .collect();
@@ -606,6 +660,7 @@ pub fn extract_text_nodes_wasm(source: &str) -> JsValue {
 pub fn flatten_ast_wasm(source: &str) -> JsValue {
     use crate::parser::AstNode;
 
+    let mapper = Utf16Mapper::new(source);
     let (ast, _) = rust_parse(source);
     let flat = crate::utils::flatten_ast(&ast);
 
@@ -614,17 +669,18 @@ pub fn flatten_ast_wasm(source: &str) -> JsValue {
         .map(|node| match node {
             AstNode::Program { span, .. } => serde_json::json!({
                 "type": "Program",
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(*span),
             }),
             AstNode::Text { content, span } => serde_json::json!({
                 "type": "Text",
                 "content": content,
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(*span),
             }),
             AstNode::FunctionCall {
                 name,
                 modifiers,
                 span,
+                name_span,
                 ..
             } => serde_json::json!({
                 "type": "FunctionCall",
@@ -634,17 +690,18 @@ pub fn flatten_ast_wasm(source: &str) -> JsValue {
                     "negated": modifiers.negated,
                     "count": modifiers.count,
                 },
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(*span),
+                "name_span": mapper.map_span(*name_span),
             }),
             AstNode::JavaScript { code, span } => serde_json::json!({
                 "type": "JavaScript",
                 "code": code,
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(*span),
             }),
             AstNode::Escaped { content, span } => serde_json::json!({
                 "type": "Escaped",
                 "content": content,
-                "span": { "start": span.start, "end": span.end },
+                "span": mapper.map_span(*span),
             }),
         })
         .collect();
@@ -703,6 +760,7 @@ pub fn count_node_types_wasm(source: &str) -> JsValue {
 /// Validate code and return detailed results
 #[wasm_bindgen(js_name = "validateCode")]
 pub fn validate_code_wasm(source: &str, metadata_wrapper: &MetadataManagerWrapper) -> JsValue {
+    let mapper = Utf16Mapper::new(source);
     let (_, errors) = crate::parser::parse_strict(source, metadata_wrapper.manager.clone());
 
     // Group errors by kind
@@ -714,7 +772,7 @@ pub fn validate_code_wasm(source: &str, metadata_wrapper: &MetadataManagerWrappe
             .or_insert_with(Vec::new)
             .push(serde_json::json!({
                 "message": error.message,
-                "span": { "start": error.span.start, "end": error.span.end },
+                "span": mapper.map_span(error.span),
             }));
     }
 
@@ -725,7 +783,7 @@ pub fn validate_code_wasm(source: &str, metadata_wrapper: &MetadataManagerWrappe
         "allErrors": errors.iter().map(|e| {
             serde_json::json!({
                 "message": e.message,
-                "span": { "start": e.span.start, "end": e.span.end },
+                "span": mapper.map_span(e.span),
                 "kind": format!("{:?}", e.kind),
             })
         }).collect::<Vec<_>>(),
@@ -749,13 +807,14 @@ pub fn parse_batch_wasm(sources: JsValue) -> JsValue {
     let results: Vec<_> = sources
         .iter()
         .map(|source| {
+            let mapper = Utf16Mapper::new(source);
             let (ast, errors) = rust_parse(source);
             serde_json::json!({
                 "ast": format_ast(&ast),
                 "errors": errors.iter().map(|e| {
                     serde_json::json!({
                         "message": e.message,
-                        "span": { "start": e.span.start, "end": e.span.end },
+                        "span": mapper.map_span(e.span),
                         "kind": format!("{:?}", e.kind),
                     })
                 }).collect::<Vec<_>>(),
@@ -777,6 +836,7 @@ pub fn validate_batch_wasm(sources: JsValue, metadata_wrapper: &MetadataManagerW
     let results: Vec<_> = sources
         .iter()
         .map(|source| {
+            let mapper = Utf16Mapper::new(source);
             let (_, errors) = crate::parser::parse_strict(source, metadata_wrapper.manager.clone());
 
             serde_json::json!({
@@ -785,7 +845,7 @@ pub fn validate_batch_wasm(sources: JsValue, metadata_wrapper: &MetadataManagerW
                 "errors": errors.iter().map(|e| {
                     serde_json::json!({
                         "message": e.message,
-                        "span": { "start": e.span.start, "end": e.span.end },
+                        "span": mapper.map_span(e.span),
                         "kind": format!("{:?}", e.kind),
                     })
                 }).collect::<Vec<_>>(),
