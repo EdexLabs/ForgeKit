@@ -70,6 +70,14 @@ impl Utf16Mapper {
             "end": self.map(span.end),
         })
     }
+
+    #[inline]
+    fn map_back(&self, utf16_offset: usize) -> usize {
+        self.byte_to_utf16
+            .iter()
+            .position(|&x| x >= utf16_offset)
+            .unwrap_or(self.byte_to_utf16.len() - 1)
+    }
 }
 
 // ============================================================================
@@ -709,18 +717,23 @@ pub fn flatten_ast_wasm(source: &str) -> JsValue {
     serde_wasm_bindgen::to_value(&result).unwrap_or(JsValue::NULL)
 }
 
-/// Return the source-code slice for a given byte span.
+/// Return the source-code slice for a given UTF-16 span.
 #[wasm_bindgen(js_name = "getSourceSlice")]
-pub fn get_source_slice_wasm(source: &str, start: usize, end: usize) -> String {
-    let span = crate::parser::Span { start, end };
+pub fn get_source_slice_wasm(source: &str, start_utf16: usize, end_utf16: usize) -> String {
+    let mapper = Utf16Mapper::new(source);
+    let span = crate::parser::Span {
+        start: mapper.map_back(start_utf16),
+        end: mapper.map_back(end_utf16),
+    };
     crate::utils::get_source_slice(source, span).to_string()
 }
 
-/// Check whether the character at `byte_idx` in `source` is escaped
+/// Check whether the character at `utf16_idx` in `source` is escaped
 /// (i.e. preceded by an odd number of backslashes).
 #[wasm_bindgen(js_name = "isEscaped")]
-pub fn is_escaped_wasm(source: &str, byte_idx: usize) -> bool {
-    crate::parser::is_escaped(source, byte_idx)
+pub fn is_escaped_wasm(source: &str, utf16_idx: usize) -> bool {
+    let mapper = Utf16Mapper::new(source);
+    crate::parser::is_escaped(source, mapper.map_back(utf16_idx))
 }
 
 // ============================================================================
