@@ -13,38 +13,39 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 # Core dependencies
-dashmap = "6.1.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-smallvec = "1.15.1"
-regex = "1.10"
+dashmap     = "6.1.0"
+serde       = { version = "1.0.228", features = ["derive"] }
+serde_json  = "1.0.149"
+smallvec    = "1.15.1"
+regex       = "1.10"
 
-# WASM dependencies (optional)
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-serde-wasm-bindgen = { version = "0.6", optional = true }
+# WASM dependencies (all optional — only compiled when feature = "wasm")
+wasm-bindgen         = { version = "0.2",  optional = true }
+wasm-bindgen-futures = { version = "0.4",  optional = true }
+js-sys               = { version = "0.3",  optional = true }
+serde-wasm-bindgen   = { version = "0.6",  optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
+# tsify-next generates TypeScript type declarations from Rust structs/enums.
+# The "js" feature activates the wasm-bindgen IntoWasmAbi/FromWasmAbi impls.
+# Only needed on the WASM boundary, so gated behind the "wasm" feature.
+tsify-next = { version = "0.5", optional = true, features = ["js"] }
+
 [dependencies.web-sys]
-version = "0.3"
+version  = "0.3"
 optional = true
 features = ["Window", "Storage"]
 
 # Platform-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# WASM uses the browser's Fetch API via reqwest
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls",
-] }
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio   = { version = "1.0",  features = ["macros", "rt-multi-thread"] }
 
 [features]
-default = []
+default    = []
 validation = []
 panic_hook = ["console_error_panic_hook"]
 wasm = [
@@ -53,38 +54,38 @@ wasm = [
   "js-sys",
   "web-sys",
   "serde-wasm-bindgen",
+  "tsify-next",          # ← new
   "panic_hook",
 ]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-tokio-test = "0.4"
+criterion    = { version = "0.5", features = ["html_reports"] }
+tokio-test   = "0.4"
 
 [[bench]]
-name = "parser"
+name    = "parser"
 harness = false
 
 [[bench]]
-name = "visitor"
+name    = "visitor"
 harness = false
 
 [[bench]]
-name = "metadata"
+name    = "metadata"
 harness = false
 
 [profile.release]
-opt-level = 3
-lto = true        # Enable link-time optimization
+opt-level     = 3
+lto           = true
 codegen-units = 1
-strip = true
+strip         = true
 
 [profile.bench]
-opt-level = 3
-lto = "fat"
+opt-level     = 3
+lto           = "fat"
 codegen-units = 1
-panic = "abort"
-strip = true
+panic         = "abort"
+strip         = true
 
 [package.metadata.wasm-pack.profile.release]
-# This explicitly tells the optimizer to allow these instructions
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

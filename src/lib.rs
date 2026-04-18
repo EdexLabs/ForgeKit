@@ -6,3 +6,5 @@ pub mod visitor;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
+#[cfg(feature = "wasm")]
+pub mod wasm_types;
