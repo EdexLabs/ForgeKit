@@ -48,8 +48,8 @@ pub trait AstVisitor {
     }
 
     /// Visit an escaped content node
-    fn visit_escaped(&mut self, content: &str, span: Span) {
-        let _ = (content, span);
+    fn visit_escaped(&mut self, name: &str, content: &str, span: Span) {
+        let _ = (name, content, span);
     }
 
     /// Dispatch to the appropriate visit method
@@ -65,7 +65,7 @@ pub trait AstVisitor {
                 ..
             } => self.visit_function_call(name, args.as_ref(), modifiers, *span),
             AstNode::JavaScript { code, span } => self.visit_javascript(code, *span),
-            AstNode::Escaped { content, span } => self.visit_escaped(content, *span),
+            AstNode::Escaped { name, content, span } => self.visit_escaped(name, content, *span),
         }
     }
 }
@@ -136,7 +136,7 @@ impl AstVisitor for NodeCounter {
         self.javascript_nodes += 1;
     }
 
-    fn visit_escaped(&mut self, _content: &str, _span: Span) {
+    fn visit_escaped(&mut self, _name: &str, _content: &str, _span: Span) {
         self.escaped_nodes += 1;
     }
 }
@@ -156,7 +156,7 @@ pub trait AstVisitorMut {
                 ..
             } => self.visit_function_call_mut(name, args, modifiers, *span),
             AstNode::JavaScript { code, span } => self.visit_javascript_mut(code, *span),
-            AstNode::Escaped { content, span } => self.visit_escaped_mut(content, *span),
+            AstNode::Escaped { name, content, span } => self.visit_escaped_mut(name, content, *span),
         }
     }
 
@@ -192,7 +192,7 @@ pub trait AstVisitorMut {
         let _ = (code, span);
     }
 
-    fn visit_escaped_mut(&mut self, content: &mut String, span: Span) {
-        let _ = (content, span);
+    fn visit_escaped_mut(&mut self, name: &mut String, content: &mut String, span: Span) {
+        let _ = (name, content, span);
     }
 }

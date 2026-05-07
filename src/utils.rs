@@ -67,10 +67,14 @@ fn format_ast_impl(node: &AstNode, output: &mut String, depth: usize) {
                 indent, span.start, span.end, code
             ));
         }
-        AstNode::Escaped { content, span } => {
+        AstNode::Escaped {
+            name,
+            content,
+            span,
+        } => {
             output.push_str(&format!(
-                "{}Escaped ({}..{}): {:?}\n",
-                indent, span.start, span.end, content
+                "{}Escaped ({}..{}): ${:?}: {:?}\n",
+                indent, span.start, span.end, name, content
             ));
         }
     }
