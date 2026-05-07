@@ -403,8 +403,12 @@ impl<'src> Parser<'src> {
                     });
                 }
 
-                // Move pos to start of content (after "code: `")
-                let content_start = block_start + 7; // len("code: `")
+                // Find the backtick to determine content start
+                let mut j = block_start + 5;
+                while j < self.source.len() && self.bytes[j] != b'`' {
+                    j += 1;
+                }
+                let content_start = j + 1;
                 self.pos = content_start;
 
                 // Find end of block (unescaped `)
