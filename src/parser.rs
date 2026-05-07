@@ -223,6 +223,7 @@ pub enum AstNode {
         span: Span,
     },
     Escaped {
+        name: String,
         content: String,
         span: Span,
     },
@@ -1117,6 +1118,7 @@ impl<'src> Parser<'src> {
             let content = self.slice(bracket_start + 1, end).to_string();
             self.pos = end + 1;
             AstNode::Escaped {
+                name,
                 content,
                 span: Span::new(start, self.pos),
             }
@@ -1129,6 +1131,7 @@ impl<'src> Parser<'src> {
             }
             self.pos = self.source.len();
             AstNode::Escaped {
+                name,
                 content: String::new(),
                 span: Span::new(start, self.pos),
             }
