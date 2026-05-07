@@ -973,7 +973,17 @@ fn parse_functions_from_js_ts(content: &str, file_path: &str) -> Vec<Function> {
             name,
             version: Some(JsonValue::String("1.0.0".to_string())),
             description,
-            brackets: brackets.or(if args.is_some() { Some(true) } else { None }),
+            brackets: brackets.or_else(|| {
+                if let Some(ref a) = args {
+                    if a.iter().any(|arg| arg.required.unwrap_or(false)) {
+                        Some(true)
+                    } else {
+                        Some(false)
+                    }
+                } else {
+                    None
+                }
+            }),
             unwrap: false,
             args,
             output,
