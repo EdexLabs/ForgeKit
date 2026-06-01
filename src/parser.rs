@@ -1326,9 +1326,15 @@ impl<'src> Parser<'src> {
                 p += escape_sequence_len(self.bytes, p).max(1);
                 continue;
             }
-            // Only count `[` that belong to a function call.
-            if self.bytes[p] == b'[' && self.is_function_bracket(self.source, p) {
-                depth += 1;
+            if self.bytes[p] == b'[' {
+                if self.is_function_bracket(self.source, p) {
+                    depth += 1;
+                } else {
+                    // This '[' is not a function bracket (e.g. the '[' in @[,] modifiers,
+                    // or a bare literal '[').  We must skip past its matching ']' so that
+                    // the unmatched ']' never prematurely decrements our depth counter.
+                    p = self.skip_non_function_bracket(p);
+                }
             } else if self.bytes[p] == b']' {
                 depth -= 1;
                 if depth == 0 {
@@ -1338,6 +1344,33 @@ impl<'src> Parser<'src> {
             p += 1;
         }
         None
+    }
+
+    /// Skip past the `]` that closes the bare (non-function) `[` at `open_pos`.
+    /// Returns the position of the closing `]`, or the last byte if unclosed.
+    /// Recursively handles nested bare brackets.
+    fn skip_non_function_bracket(&self, open_pos: usize) -> usize {
+        let mut p = open_pos + 1;
+        while p < self.bytes.len() {
+            if self.bytes[p] == b'\\' {
+                p += escape_sequence_len(self.bytes, p).max(1);
+                continue;
+            }
+            if self.bytes[p] == b'[' {
+                if self.is_function_bracket(self.source, p) {
+                    // Function bracket inside a bare bracket — shouldn't normally
+                    // happen, but handle it safely by treating it as depth-tracked.
+                    // We just skip it as an opaque unit here.
+                    p = self.skip_non_function_bracket(p);
+                } else {
+                    p = self.skip_non_function_bracket(p);
+                }
+            } else if self.bytes[p] == b']' {
+                return p;
+            }
+            p += 1;
+        }
+        self.bytes.len().saturating_sub(1)
     }
 
     fn find_matching_brace(&self, open_pos: usize) -> Option<usize> {
