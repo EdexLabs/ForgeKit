@@ -76,6 +76,9 @@ pub struct ValidationConfig {
     pub validate_functions: bool,
     /// Validate bracket usage (required/optional/forbidden)
     pub validate_brackets: bool,
+    /// Validate that literal argument values match the expected primitive type
+    /// (Number, Boolean). Requires metadata. Only fires on pure-text args.
+    pub validate_types: bool,
 }
 
 impl ValidationConfig {
@@ -86,6 +89,7 @@ impl ValidationConfig {
             validate_enums: true,
             validate_functions: true,
             validate_brackets: true,
+            validate_types: true,
         }
     }
 
@@ -96,6 +100,7 @@ impl ValidationConfig {
             validate_enums: false,
             validate_functions: false,
             validate_brackets: true,
+            validate_types: false,
         }
     }
 
@@ -106,6 +111,7 @@ impl ValidationConfig {
             || self.validate_enums
             || self.validate_functions
             || self.validate_brackets
+            || self.validate_types
     }
 }
 
@@ -288,13 +294,16 @@ impl AstNode {
 // Parse Errors
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ErrorKind {
     Syntax,
     ArgumentCount,
     EnumValue,
     UnknownFunction,
     BracketUsage,
+    /// A literal argument value does not match the expected primitive type
+    /// (e.g. passing `"hello"` where a `Number` is required).
+    TypeMismatch,
 }
 
 #[derive(Debug, Clone)]
@@ -751,11 +760,34 @@ impl<'src> Parser<'src> {
                     Span::new(start, self.source.len()),
                 ));
             }
-            self.pos = self.source.len();
+            // Error recovery: don't consume the whole file — scan to the next
+            // unescaped `$` so subsequent calls can still be parsed.
+            self.recover_to_next_function();
             AstNode::JavaScript {
                 code: String::new(),
                 span: Span::new(start, self.pos),
             }
+        }
+    }
+
+    /// Scan forward from the current position to the next top-level `$` that
+    /// is not escape-preceded.  Used for error recovery so that a single
+    /// unclosed bracket or brace does not silently discard the rest of the
+    /// document.
+    fn recover_to_next_function(&mut self) {
+        while self.pos < self.bytes.len() {
+            if self.bytes[self.pos] == b'$' {
+                // Make sure it is not the result of a `\\$` escape sequence
+                let backslashes = self.bytes[..self.pos]
+                    .iter()
+                    .rev()
+                    .take_while(|&&b| b == b'\\')
+                    .count();
+                if backslashes % 2 == 0 {
+                    return; // Stop here; the main loop will parse this call
+                }
+            }
+            self.pos += 1;
         }
     }
 
@@ -996,6 +1028,79 @@ impl<'src> Parser<'src> {
                 self.validate_enum_value(func_name, provided_arg, func_arg, provided_arg.span);
             }
         }
+
+        // ── Type checking ───────────────────────────────────────────────
+        // Only fires on args that are purely literal text (no nested calls).
+        // Enum-typed args are skipped here since they are checked above.
+        if self.config.validate_types {
+            for (i, provided_arg) in provided_args.iter().enumerate() {
+                let func_arg = if i < func_args.len() {
+                    &func_args[i]
+                } else if has_rest {
+                    func_args.last().unwrap()
+                } else {
+                    continue;
+                };
+                // Skip if enum validation applies
+                if func_arg.enum_name.is_some() || func_arg.arg_enum.is_some() {
+                    continue;
+                }
+                if let Some(text_value) = provided_arg.as_text() {
+                    self.validate_arg_type(func_name, text_value.trim(), func_arg, provided_arg.span);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    fn validate_arg_type(
+        &mut self,
+        func_name: &str,
+        value: &str,
+        func_arg: &Arg,
+        span: Span,
+    ) {
+        if value.is_empty() {
+            return;
+        }
+
+        // Resolve the type string from the JsonValue schema
+        let type_str: Option<&str> = match &func_arg.arg_type {
+            serde_json::Value::String(s) => Some(s.as_str()),
+            serde_json::Value::Array(arr) => arr
+                .iter()
+                .find_map(|v| v.as_str())
+                .filter(|s| !s.is_empty()),
+            _ => None,
+        };
+
+        match type_str.map(|s| s.to_lowercase()).as_deref() {
+            Some("number") | Some("integer") => {
+                if value.parse::<f64>().is_err() {
+                    self.errors.push(ParseError::new(
+                        format!(
+                            "{}: argument '{}' expects a number, got {:?}",
+                            func_name, func_arg.name, value
+                        ),
+                        span,
+                        ErrorKind::TypeMismatch,
+                    ));
+                }
+            }
+            Some("boolean") => {
+                if !matches!(value, "true" | "false") {
+                    self.errors.push(ParseError::new(
+                        format!(
+                            "{}: argument '{}' expects true or false, got {:?}",
+                            func_name, func_arg.name, value
+                        ),
+                        span,
+                        ErrorKind::TypeMismatch,
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
 
     #[cfg(feature = "validation")]
@@ -1133,7 +1238,8 @@ impl<'src> Parser<'src> {
                     name_span,
                 ));
             }
-            self.pos = self.source.len();
+            // Error recovery: scan to next unescaped `$` rather than halting.
+            self.recover_to_next_function();
             AstNode::Escaped {
                 name,
                 content: String::new(),
