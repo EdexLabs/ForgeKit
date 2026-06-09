@@ -731,6 +731,12 @@ impl MetadataManager {
         self.trie.read().unwrap().len()
     }
 
+    /// Get the number of custom (user-defined) functions currently loaded.
+    #[inline]
+    pub fn custom_function_count(&self) -> usize {
+        self.custom_function_names.len()
+    }
+
     /// Get enum count
     #[inline]
     pub fn enum_count(&self) -> usize {
